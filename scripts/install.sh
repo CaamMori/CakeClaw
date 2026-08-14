@@ -797,35 +797,6 @@ PYEOF
           chmod 600 /data/etc/openclaw/runtime.env
           info "已写入 CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}"
         fi
-        # 重启 Gateway 并等待 healthy（补丁挂载 + 白名单改动需重启生效）
-        echo ""
-        info "重启 Gateway 使补丁生效..."
-        docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
-        OC_READY=false
-        for i in $(seq 1 36); do
-          sleep 5
-          HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
-          case "${HS}" in
-            healthy)
-              ok "Gateway 已就绪 (healthy, ${i}x5s)"
-              OC_READY=true
-              break
-              ;;
-            unhealthy)
-              docker logs cakeclaw-gateway --tail 30 2>&1
-              fail "Gateway 健康检查失败 (unhealthy)"
-              ;;
-            starting|no-health) : ;;
-            *)
-              docker logs cakeclaw-gateway --tail 30 2>&1
-              fail "Gateway 状态异常: ${HS}"
-              ;;
-          esac
-        done
-        if [ "${OC_READY}" != true ]; then
-          docker logs cakeclaw-gateway --tail 30 2>&1
-          fail "Gateway 未在 180s 内变为 healthy"
-        fi
         ;;
       *) : ;;
     esac
@@ -938,6 +909,39 @@ os.replace(tmp, path)
 print(f"[configured provider] {name}")
 PYEOF
   ok "provider '${P_NAME}' 已写入 openclaw.json（重启 Gateway 生效）"
+
+  # 若本 provider 是 Codex 后端（12.5 内已挂补丁 + 写白名单），在所有改动落盘后统一重启一次：
+  # 先拉模型 + merge provider 完成，再重启并等 healthy，重启完即最终态。
+  if [ "${CODECX_DETECTED:-false}" = "true" ]; then
+    echo ""
+    info "重启 Gateway 使补丁 + provider 配置生效..."
+    docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
+    OC_READY=false
+    for i in $(seq 1 36); do
+      sleep 5
+      HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
+      case "${HS}" in
+        healthy)
+          ok "Gateway 已就绪 (healthy, ${i}x5s)"
+          OC_READY=true
+          break
+          ;;
+        unhealthy)
+          docker logs cakeclaw-gateway --tail 30 2>&1
+          fail "Gateway 健康检查失败 (unhealthy)"
+          ;;
+        starting|no-health) : ;;
+        *)
+          docker logs cakeclaw-gateway --tail 30 2>&1
+          fail "Gateway 状态异常: ${HS}"
+          ;;
+      esac
+    done
+    if [ "${OC_READY}" != true ]; then
+      docker logs cakeclaw-gateway --tail 30 2>&1
+      fail "Gateway 未在 180s 内变为 healthy"
+    fi
+  fi
 }
 
 # 非交互自动配置（CI / 无 TTY / 一键脚本）：通过 CAKECLAW_PROVIDER_* 环境变量（可写在 .env）
