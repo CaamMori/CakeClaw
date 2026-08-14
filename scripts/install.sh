@@ -21,6 +21,7 @@ PHASE2=true; PHASE3=true
 CODEX_FIX=false
 CODEX_FIX_B=false
 TELEGRAM_ENABLE=false
+OPENCODE_INSTALL=false
 HELP=false
 for arg in "$@"; do
   case "$arg" in
@@ -29,8 +30,9 @@ for arg in "$@"; do
     --with-codex-fix) CODEX_FIX=true ;;
     --with-codex-fix-b) CODEX_FIX_B=true ;;
     --with-telegram) TELEGRAM_ENABLE=true ;;
+    --with-opencode) OPENCODE_INSTALL=true ;;
     --help|-h)   HELP=true ;;
-    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --with-telegram --help" ;;
+    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --with-telegram --with-opencode --help" ;;
   esac
 done
 if $HELP; then
@@ -40,6 +42,7 @@ if $HELP; then
   echo "  --with-codex-fix    启用 Codex 修复（挂载 dist 补丁 + env 白名单，需 api 已是 Codex 专属值）"
   echo "  --with-codex-fix-b  启用 Codex 修复 B（额外支持 api=openai-responses，改 dist 两处）"
   echo "  --with-telegram     启用 Telegram 机器人接入（需 TELEGRAM_BOT_TOKEN）"
+  echo "  --with-opencode     安装 OpenCode（终端 AI 编程代理，opencode.ai）"
   echo "  --help              显示此帮助"
   exit 0
 fi
@@ -91,6 +94,7 @@ CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS:-}"
 # Telegram 机器人接入（可选）：见 README
 # 启用方式：install.sh 传 --with-telegram，或 .env 里 TELEGRAM_ENABLE=1。二者等价。
 if [ "${TELEGRAM_ENABLE:-}" = "1" ]; then TELEGRAM_ENABLE=true; fi
+if [ "${OPENCODE_INSTALL:-}" = "1" ]; then OPENCODE_INSTALL=true; fi
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_ALLOW_FROM="${TELEGRAM_ALLOW_FROM:-}"
 
@@ -1002,6 +1006,38 @@ if $TELEGRAM_ENABLE; then
   fi
 else
   info "未启用 Telegram 接入（--with-telegram 未指定）"
+fi
+
+# ── 12.7 OpenCode 安装（可选）──
+# 交互式引导是否安装 OpenCode（终端 AI 编程代理，opencode.ai）。
+# 安装方式：curl -fsSL https://opencode.ai/install | bash（官方推荐）。
+# 非交互环境通过 OPENCODE_INSTALL=1 环境变量触发。
+step "12.7 OpenCode 安装"
+configure_opencode() {
+  echo ""
+  echo "  OpenCode 是开源的终端 AI 编程代理（opencode.ai），可直接在终端里与 AI 协作编码。"
+  echo "  安装后输入 opencode 进入 TUI（终端交互界面），自带模型配置引导。"
+  read -r -p "  是否安装 OpenCode (y/N): " DO_OC
+  case "${DO_OC}" in
+    y|Y|yes|YES)
+      info "正在安装 OpenCode（官方 curl 安装）..."
+      curl -fsSL https://opencode.ai/install | bash 2>&1 | tail -5
+      ok "OpenCode 安装完成（输入 opencode 启动）"
+      ;;
+    *) info "跳过 OpenCode 安装"; return 0 ;;
+  esac
+}
+
+if $OPENCODE_INSTALL; then
+  if [ -t 0 ]; then
+    configure_opencode
+  else
+    info "非交互环境，OPENCODE_INSTALL=1，正在安装 OpenCode..."
+    curl -fsSL https://opencode.ai/install | bash 2>&1 | tail -5
+    ok "OpenCode 安装完成"
+  fi
+else
+  info "未启用 OpenCode 安装（--with-opencode 未指定）"
 fi
 
 # ── 完成 ──

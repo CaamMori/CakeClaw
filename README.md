@@ -86,6 +86,27 @@ TELEGRAM_BOT_TOKEN=123:abc...
 TELEGRAM_ALLOW_FROM=8524071159
 ```
 
+### 可选：安装 OpenCode（--with-opencode）
+
+想再装一个终端 AI 编程代理，安装时开启：
+
+```bash
+sudo ./scripts/install.sh --with-opencode
+```
+
+安装过程会交互式询问是否安装，确认后通过官方脚本安装：
+
+```bash
+curl -fsSL https://opencode.ai/install | bash
+```
+
+装完后输入 `opencode` 进入 TUI（终端交互界面），自带模型配置引导。
+非交互一键部署可在 `.env` 里设：
+
+```bash
+OPENCODE_INSTALL=1
+```
+
 部署完成后：
 
 `install.sh` 末尾会交互式引导你配置模型 provider（可直接回车跳过）：
