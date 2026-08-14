@@ -303,7 +303,7 @@ if $CODEX_FIX || $CODEX_FIX_B; then
 fi
 chmod 600 /data/etc/openclaw/runtime.env
 chown -R 1000:1000 /data/state /data/workspace 2>/dev/null || true
-ok "密钥已写入"
+ok "密钥已写入 /data/etc/openclaw/runtime.env"
 
 # ── 6. 拉镜像 & 启动 ──
 step "6. 部署 Gateway"
@@ -631,7 +631,7 @@ cakeclaw 凭证 (部署: $(date -u +%Y-%m-%dT%H:%M:%SZ))
 Token 读取:  grep OPENCLAW_GATEWAY_TOKEN /data/etc/openclaw/runtime.env
 EOF
 chmod 600 /root/cakeclaw-credentials.txt
-ok "凭证摘要已写入"
+ok "凭证摘要: /root/cakeclaw-credentials.txt"
 
 # ── 12. 知识库 ──
 for f in environment decisions incidents projects; do
@@ -699,6 +699,110 @@ configure_provider() {
   if [ "${P_TYPE}" = "3" ]; then
     read -r -p "  Azure API 版本（如 2024-06-01，回车用默认）: " P_API_VERSION
     P_API_VERSION="${P_API_VERSION:-2024-06-01}"
+  fi
+
+  # 类型 4（OpenAI 兼容格式）：判断是否 Codex（type=57）后端（如 ChatGPT Subscription 中转）
+  # 如果是，则引导用户选择补丁方案，并自动设置 P_API + 白名单
+  CODECX_DETECTED=false
+  if [ "${P_TYPE}" = "4" ]; then
+    echo ""
+    echo "  该后端是否为 ChatGPT Subscription / Codex（type=57）中转？"
+    echo "  （特征：只在 /v1/responses 收发，拒绝 system prompt，常见于自定义中转）"
+    read -r -p "  是否为 Codex 后端 (y/N): " DO_CODEX
+    case "${DO_CODEX}" in
+      y|Y|yes|YES)
+        CODECX_DETECTED=true
+        echo ""
+        echo "  Codex 后端需要补丁修复 system prompt 兼容。已提供两种补丁方案："
+        echo "    B) 方案 B（推荐）— 改 api 为 openai-responses，覆盖绝大多数自定义 Codex 中转"
+        echo "    C) Option C           — 仅 env 白名单，不改 api，需 api 已是 Codex 专属值"
+        read -r -p "  选择补丁方案 (B/C，默认 B): " CODECX_PATCH
+        CODECX_PATCH="${CODECX_PATCH:-B}"
+        case "${CODECX_PATCH}" in
+          b|B|2)
+            P_API="openai-responses"
+            CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
+            info "已选择方案 B：api 设为 openai-responses"
+            ;;
+          c|C|3)
+            CODECX_PATCH_SRC="${CODEX_FIX_PATCH_SRC}"
+            info "已选择 Option C：仅 env 白名单补丁"
+            ;;
+          *)
+            P_API="openai-responses"
+            CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
+            info "默认选择方案 B"
+            ;;
+        esac
+        # 将当前 provider 名加入白名单
+        if [ -n "${P_NAME}" ]; then
+          if [ -z "${CODEX_RESPONSES_PROVIDERS}" ]; then
+            CODEX_RESPONSES_PROVIDERS="${P_NAME}"
+          else
+            case ",${CODEX_RESPONSES_PROVIDERS}," in
+              *",${P_NAME},"*) : ;;
+              *) CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS},${P_NAME}" ;;
+            esac
+          fi
+        fi
+        # 执行补丁挂载：复制 patch 文件 + 注入 compose volumes
+        if [ -f "${CODECX_PATCH_SRC}" ]; then
+          mkdir -p /data/etc/openclaw/patches
+          cp "${CODECX_PATCH_SRC}" /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
+          chmod 644 /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
+          CODEX_MOUNT_SRC="/data/etc/openclaw/patches/$(basename "${CODEX_FIX_PATCH_DST}")" \
+          CODEX_MOUNT_DST="${CODEX_FIX_PATCH_DST}" \
+          python3 - /data/etc/openclaw/docker-compose.yml << 'PYEOF'
+import sys, os
+path = sys.argv[1]
+mount_src = os.environ["CODEX_MOUNT_SRC"]
+mount_dst = os.environ["CODEX_MOUNT_DST"]
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+new_lines = []
+volumes_key_idx = None
+for i, line in enumerate(lines):
+    if not volumes_key_idx and line.strip() == "volumes:":
+        volumes_key_idx = i
+    new_lines.append(line)
+if volumes_key_idx is not None:
+    insert_after = None
+    for j in range(volumes_key_idx + 1, len(new_lines)):
+        nl = new_lines[j]
+        if nl.startswith("    ") and nl.strip() != "":
+            if nl.strip().startswith("-"):
+                insert_after = j
+            else:
+                break
+        elif nl.strip() == "":
+            break
+        else:
+            break
+    if insert_after is None:
+        insert_after = volumes_key_idx
+    new_lines.insert(insert_after + 1, "      - " + mount_src + ":" + mount_dst + "\n")
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(new_lines)
+print("injected")
+PYEOF
+          ok "补丁已挂载到 docker-compose.yml"
+        else
+          info "补丁文件 ${CODECX_PATCH_SRC} 不存在，跳过挂载（请手动处理）"
+        fi
+        # 写白名单到 runtime.env
+        if [ -n "${CODEX_RESPONSES_PROVIDERS}" ]; then
+          grep -v '^OPENCLAW_CODEX_RESPONSES_PROVIDERS=' /data/etc/openclaw/runtime.env > /data/etc/openclaw/runtime.env.tmp 2>/dev/null || true
+          echo "OPENCLAW_CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}" >> /data/etc/openclaw/runtime.env.tmp
+          mv /data/etc/openclaw/runtime.env.tmp /data/etc/openclaw/runtime.env
+          chmod 600 /data/etc/openclaw/runtime.env
+          info "已写入 CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}"
+        fi
+        echo ""
+        info "补丁配置完成。部署完成后需重启 Gateway 生效："
+        info "  docker compose -f /data/etc/openclaw/docker-compose.yml up -d cakeclaw-gateway"
+        ;;
+      *) : ;;
+    esac
   fi
 
   # 自动拉取模型列表（非交互环境或拉取失败则退化为手动填一个模型 id）
