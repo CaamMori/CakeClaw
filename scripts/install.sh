@@ -16,8 +16,43 @@ ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
 info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
 step() { echo ""; echo -e "${GREEN}── ${1} ──${NC}"; }
 
+# 交互输入优先使用 stdin；若 stdin 被管道/重定向占用但当前仍有控制终端，
+# 则从 /dev/tty 读取。这样 `curl ... | bash`、`... | tee` 等启动方式仍可提问；
+# 真正无终端的 CI 则继续走环境变量自动配置。
+INTERACTIVE=false
+PROMPT_INPUT="/dev/stdin"
+if [ -t 0 ]; then
+  INTERACTIVE=true
+elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  INTERACTIVE=true
+  PROMPT_INPUT="/dev/tty"
+fi
+
+prompt() {
+  local message="$1" variable="$2" value=""
+  if ! IFS= read -r -p "${message}" value < "${PROMPT_INPUT}"; then
+    value=""
+  fi
+  printf -v "${variable}" '%s' "${value}"
+}
+
 # 等待 Gateway 容器 healthy（与 compose healthcheck 对齐，覆盖 start_period 120s）。
 # 不只看容器 Up（Up 可能仍 starting），而看 docker inspect Health.Status；异常则 fail。
+verify_control_ui() {
+  local url
+  if [ -n "${DOMAIN}" ]; then
+    url="https://${DOMAIN}/"
+  else
+    url="http://127.0.0.1:8080/"
+  fi
+  local status
+  status="$(curl -ksS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 "${url}" || true)"
+  case "${status}" in
+    200) ok "控制台可访问 (${url})" ;;
+    *) fail "控制台不可访问 (${url}, HTTP ${status:-000})；请检查 Nginx 上游与 Gateway 日志，部署未完成" ;;
+  esac
+}
+
 wait_gateway_ready() {
   info "等待 Gateway 就绪 (max 180s，覆盖 start_period 120s + healthcheck)..."
   local READY=false
@@ -643,6 +678,51 @@ for f in environment decisions incidents projects; do
   touch "/data/knowledge/${f}.md" 2>/dev/null || true
 done
 
+# ── 12.4 Codex Responses 修复（可选）──
+# 独立于 provider 配置先询问一次：这样用户即使稍后跳过 provider 配置，或通过控制台配置
+# provider，也能在首装时完成补丁挂载。provider 名用于 Responses 路径白名单。
+step "12.4 Codex Responses 修复（可选）"
+configure_codex_fix_interactive() {
+  echo ""
+  echo "  是否启用 Codex / ChatGPT Subscription（type=57）兼容补丁？直接回车跳过。"
+  echo "  仅当后端只接受 /v1/responses 且拒绝 system prompt 时需要。"
+  prompt "  是否启用 (y/N): " DO_CODEX_FIX
+  case "${DO_CODEX_FIX}" in
+    y|Y|yes|YES) : ;;
+    *) info "跳过 Codex Responses 修复"; return 0 ;;
+  esac
+
+  echo "    A) 方案 A — 仅 env 白名单，不改 api，需 api 已是 Codex 专属值"
+  echo "    B) 方案 B（推荐）— 支持 api=openai-responses，覆盖绝大多数自定义 Codex 中转"
+  prompt "  选择补丁方案 (A/B，默认 B): " CODEX_PATCH_CHOICE
+  case "${CODEX_PATCH_CHOICE:-B}" in
+    a|A|1)
+      CODEX_FIX=true
+      info "已选择方案 A"
+      ;;
+    *)
+      CODEX_FIX_B=true
+      info "已选择方案 B"
+      ;;
+  esac
+
+  prompt "  要走 Codex Responses 的 provider 名称（可逗号分隔；回车稍后配置）: " CODEX_PROVIDER_INPUT
+  CODEX_PROVIDER_INPUT="$(echo "${CODEX_PROVIDER_INPUT}" | tr ' ' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+  if [ -n "${CODEX_PROVIDER_INPUT}" ]; then
+    CODEX_RESPONSES_PROVIDERS="${CODEX_PROVIDER_INPUT}"
+  else
+    info "未填 provider 名；补丁会挂载，provider 白名单可在后续 provider 配置中补齐"
+  fi
+}
+
+if $INTERACTIVE && ! $CODEX_FIX && ! $CODEX_FIX_B; then
+  configure_codex_fix_interactive
+elif $CODEX_FIX || $CODEX_FIX_B; then
+  info "已通过参数或 .env 启用 Codex Responses 修复"
+else
+  info "非交互环境，未设置 Codex 修复开关，跳过"
+fi
+
 # ── 12.5 模型 Provider 配置（交互）──
 # 引导用户选择哪家 API（OpenAI / Claude / Azure / OpenAI 兼容），按各家预设好 baseUrl 默认值、
 # 鉴权方式与 api 适配器字段；填 key 后自动调用各家 /models 端点拉取可用模型列表供用户勾选，
@@ -654,7 +734,7 @@ configure_provider() {
 
   echo ""
   echo "  现在配置一个模型 provider？ 直接回车跳过（稍后可在控制台 Config 手动配）"
-  read -r -p "  是否配置 (y/N): " DO_CONF
+  prompt "  是否配置 (y/N): " DO_CONF
   case "${DO_CONF}" in
     y|Y|yes|YES) : ;;
     *) info "跳过模型 provider 配置"; return 0 ;;
@@ -666,7 +746,7 @@ configure_provider() {
   echo "    2) Anthropic (Claude)  api.anthropic.com"
   echo "    3) Azure OpenAI        自定义 endpoint"
   echo "    4) OpenAI 兼容格式     自定义 baseUrl（如中转站/vLLM/Ollama）"
-  read -r -p "  请输入 1-4 (默认 4): " P_TYPE
+  prompt "  请输入 1-4 (默认 4): " P_TYPE
   P_TYPE="${P_TYPE:-4}"
 
   P_NAME=""; P_URL=""; P_KEY=""; P_API=""; P_MODELS_URL=""; P_AUTH=""
@@ -689,20 +769,20 @@ configure_provider() {
 
   # Azure 需要手动填 endpoint；兼容格式需要手动填 baseUrl
   if [ "${P_TYPE}" = "3" ] || [ "${P_TYPE}" = "4" ]; then
-    read -r -p "  Base URL（如 https://your-resource.openai.azure.com/openai/v1 或 https://host/v1）: " P_URL
+    prompt "  Base URL（如 https://your-resource.openai.azure.com/openai/v1 或 https://host/v1）: " P_URL
   fi
 
-  read -r -p "  Provider 名称（回车用默认 '${P_NAME:-my-provider}'）: " P_NAME_IN
+  prompt "  Provider 名称（回车用默认 '${P_NAME:-my-provider}'）: " P_NAME_IN
   [ -n "${P_NAME_IN}" ] && P_NAME="${P_NAME_IN}"
   [ -n "${P_NAME}" ] || P_NAME="my-provider"
 
-  read -r -p "  API Key: " P_KEY
+  prompt "  API Key: " P_KEY
   [ -n "${P_KEY}" ] || { info "未填 API Key，取消"; return 0; }
 
   # Azure 还需 api-version
   P_API_VERSION=""
   if [ "${P_TYPE}" = "3" ]; then
-    read -r -p "  Azure API 版本（如 2024-06-01，回车用默认）: " P_API_VERSION
+    prompt "  Azure API 版本（如 2024-06-01，回车用默认）: " P_API_VERSION
     P_API_VERSION="${P_API_VERSION:-2024-06-01}"
   fi
 
@@ -713,32 +793,39 @@ configure_provider() {
     echo ""
     echo "  该后端是否为 ChatGPT Subscription / Codex（type=57）中转？"
     echo "  （特征：只在 /v1/responses 收发，拒绝 system prompt，常见于自定义中转）"
-    read -r -p "  是否为 Codex 后端 (y/N): " DO_CODEX
+    prompt "  是否为 Codex 后端 (y/N): " DO_CODEX
     case "${DO_CODEX}" in
       y|Y|yes|YES)
         CODECX_DETECTED=true
-        echo ""
-        echo "  Codex 后端需要补丁修复 system prompt 兼容。已提供两种补丁方案："
-        echo "    A) 方案 A — 仅 env 白名单，不改 api，需 api 已是 Codex 专属值"
-        echo "    B) 方案 B（推荐）— 改 api 为 openai-responses，覆盖绝大多数自定义 Codex 中转"
-        read -r -p "  选择补丁方案 (A/B，默认 B): " CODECX_PATCH
-        CODECX_PATCH="${CODECX_PATCH:-B}"
-        case "${CODECX_PATCH}" in
-          a|A|1)
+        if $CODEX_FIX || $CODEX_FIX_B; then
+          # 已在 12.4 或通过参数/.env 选择方案；此处仅套用 api 并补当前 provider 白名单。
+          if $CODEX_FIX_B; then
+            P_API="openai-responses"
+            CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
+            info "复用已选择的方案 B：api 设为 openai-responses"
+          else
             CODECX_PATCH_SRC="${CODEX_FIX_PATCH_SRC}"
-            info "已选择方案 A：仅 env 白名单补丁"
-            ;;
-          b|B|2)
-            P_API="openai-responses"
-            CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
-            info "已选择方案 B：api 设为 openai-responses"
-            ;;
-          *)
-            P_API="openai-responses"
-            CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
-            info "默认选择方案 B"
-            ;;
-        esac
+            info "复用已选择的方案 A：仅 env 白名单补丁"
+          fi
+        else
+          echo ""
+          echo "  Codex 后端需要补丁修复 system prompt 兼容。已提供两种补丁方案："
+          echo "    A) 方案 A — 仅 env 白名单，不改 api，需 api 已是 Codex 专属值"
+          echo "    B) 方案 B（推荐）— 改 api 为 openai-responses，覆盖绝大多数自定义 Codex 中转"
+          prompt "  选择补丁方案 (A/B，默认 B): " CODECX_PATCH
+          CODECX_PATCH="${CODECX_PATCH:-B}"
+          case "${CODECX_PATCH}" in
+            a|A|1)
+              CODECX_PATCH_SRC="${CODEX_FIX_PATCH_SRC}"
+              info "已选择方案 A：仅 env 白名单补丁"
+              ;;
+            *)
+              P_API="openai-responses"
+              CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
+              info "已选择方案 B：api 设为 openai-responses"
+              ;;
+          esac
+        fi
         # 将当前 provider 名加入白名单
         if [ -n "${P_NAME}" ]; then
           if [ -z "${CODEX_RESPONSES_PROVIDERS}" ]; then
@@ -869,7 +956,7 @@ PYEOF
     echo ""
     echo "  检测到以下模型，直接回车 = 全部加入；输入编号逗号分隔 = 只选部分；输入单个模型 id 也可："
     nl -ba /tmp/cakeclaw-models.txt
-    read -r -p "  选择（回车=全部）: " SEL
+    prompt "  选择（回车=全部）: " SEL
     if [ -z "${SEL}" ]; then
       P_MODELS=$(paste -sd'\n' /tmp/cakeclaw-models.txt)
     else
@@ -886,7 +973,7 @@ PYEOF
       done
     fi
   else
-    read -r -p "  未能自动拉取模型，请手动输入一个模型 id（如 gpt-4o-mini）: " P_MODELS
+    prompt "  未能自动拉取模型，请手动输入一个模型 id（如 gpt-4o-mini）: " P_MODELS
   fi
   rm -f /tmp/cakeclaw-models.txt
 
@@ -917,6 +1004,8 @@ with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write("\n")
 os.replace(tmp, path)
+os.chown(path, 1000, 1000)
+os.chmod(path, 0o600)
 print(f"[configured provider] {name}")
 PYEOF
   ok "provider '${P_NAME}' 已写入 openclaw.json（重启 Gateway 生效）"
@@ -997,6 +1086,8 @@ with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write("\n")
 os.replace(tmp, path)
+os.chown(path, 1000, 1000)
+os.chmod(path, 0o600)
 print(f"[configured provider] {name}")
 PYEOF
   ok "provider '${P_NAME}' 已写入 openclaw.json（重启 Gateway 生效）"
@@ -1004,7 +1095,7 @@ PYEOF
 }
 
 # 非交互环境（如 CI / 无 TTY）：有 CAKECLAW_PROVIDER_BASE_URL 则自动配置，否则才跳过
-if [ -t 0 ]; then
+if $INTERACTIVE; then
   configure_provider
 else
   if [ -n "${CAKECLAW_PROVIDER_BASE_URL:-}" ]; then
@@ -1025,7 +1116,7 @@ configure_telegram() {
 
   echo ""
   echo "  配置 Telegram 机器人？ 直接回车跳过（稍后可在控制台 Config 手动配）"
-  read -r -p "  是否配置 (y/N): " DO_TG
+  prompt "  是否配置 (y/N): " DO_TG
   case "${DO_TG}" in
     y|Y|yes|YES) : ;;
     *) info "跳过 Telegram 配置"; return 0 ;;
@@ -1033,11 +1124,11 @@ configure_telegram() {
 
   echo ""
   echo "  提示：先在同 Telegram 里找 @BotFather → /newbot 创建机器人，拿到 token。"
-  read -r -p "  Bot Token（形如 123456:ABC...）: " TG_TOKEN
+  prompt "  Bot Token（形如 123456:ABC...）: " TG_TOKEN
   [ -n "${TG_TOKEN}" ] || { info "未填 Bot Token，跳过"; return 0; }
 
   # 账号 ID（allowFrom）：可单个或多个（逗号分隔/空格分隔）
-  read -r -p "  允许访问的 Telegram 账号 ID（多个用逗号分隔，见 README 查 ID 方法）: " TG_ALLOW
+  prompt "  允许访问的 Telegram 账号 ID（多个用逗号分隔，见 README 查 ID 方法）: " TG_ALLOW
   TG_ALLOW="$(echo "${TG_ALLOW}" | tr ',' ' ')"
   # 规整为逗号分隔的 id 列表
   TG_ALLOW_JSON=$(echo "${TG_ALLOW}" | tr ' ' '\n' | sed '/^[[:space:]]*$/d' | paste -sd',' -)
@@ -1070,9 +1161,12 @@ with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write("\n")
 os.replace(tmp, path)
+os.chown(path, 1000, 1000)
+os.chmod(path, 0o600)
 print("[configured telegram]")
 PYEOF
   ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
+  info "Bot Token 已保存到 /data/etc/openclaw/telegram-bot-token（权限 600，不写入 openclaw.json）"
   NEED_RESTART=true
 }
 
@@ -1109,14 +1203,17 @@ with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write("\n")
 os.replace(tmp, path)
+os.chown(path, 1000, 1000)
+os.chmod(path, 0o600)
 print("[configured telegram]")
 PYEOF
   ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
+  info "Bot Token 已保存到 /data/etc/openclaw/telegram-bot-token（权限 600，不写入 openclaw.json）"
   NEED_RESTART=true
 }
 
 # 默认交互询问；非交互环境则用环境变量自动配置。
-if [ -t 0 ]; then
+if $INTERACTIVE; then
   configure_telegram
 else
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
@@ -1135,7 +1232,7 @@ configure_opencode() {
   echo ""
   echo "  OpenCode 是开源的终端 AI 编程代理（opencode.ai），可直接在终端里与 AI 协作编码。"
   echo "  安装后输入 opencode 进入 TUI（终端交互界面），自带模型配置引导。"
-  read -r -p "  是否安装 OpenCode (y/N): " DO_OC
+  prompt "  是否安装 OpenCode (y/N): " DO_OC
   case "${DO_OC}" in
     y|Y|yes|YES)
       info "正在安装 OpenCode（官方 curl 安装）..."
@@ -1147,7 +1244,7 @@ configure_opencode() {
 }
 
 # 默认交互询问；非交互环境则用 OPENCODE_INSTALL=1 环境变量触发。
-if [ -t 0 ]; then
+if $INTERACTIVE; then
   configure_opencode
 else
   if $OPENCODE_INSTALL; then
@@ -1168,6 +1265,10 @@ if $NEED_RESTART; then
   docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
   wait_gateway_ready
 fi
+
+# ── 12.9 控制台验收 ──
+step "12.9 控制台验收"
+verify_control_ui
 
 # ── 完成 ──
 echo ""
