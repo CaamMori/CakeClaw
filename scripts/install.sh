@@ -587,7 +587,8 @@ CONTROL_UI_ORIGIN="$CONTROL_UI_ORIGIN" python3 - /data/state/openclaw.json << 'P
 import json, os, sys, tempfile
 path = sys.argv[1]
 with open(path, encoding="utf-8") as f:
-    cfg = json.load(f)\ngateway = cfg.setdefault("gateway", {})
+    cfg = json.load(f)
+gateway = cfg.setdefault("gateway", {})
 ui = gateway.setdefault("controlUi", {})
 origin = os.environ["CONTROL_UI_ORIGIN"]
 origins = ui.setdefault("allowedOrigins", [])
