@@ -797,9 +797,35 @@ PYEOF
           chmod 600 /data/etc/openclaw/runtime.env
           info "已写入 CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}"
         fi
+        # 重启 Gateway 并等待 healthy（补丁挂载 + 白名单改动需重启生效）
         echo ""
-        info "补丁配置完成。部署完成后需重启 Gateway 生效："
-        info "  docker compose -f /data/etc/openclaw/docker-compose.yml up -d cakeclaw-gateway"
+        info "重启 Gateway 使补丁生效..."
+        docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
+        OC_READY=false
+        for i in $(seq 1 36); do
+          sleep 5
+          HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
+          case "${HS}" in
+            healthy)
+              ok "Gateway 已就绪 (healthy, ${i}x5s)"
+              OC_READY=true
+              break
+              ;;
+            unhealthy)
+              docker logs cakeclaw-gateway --tail 30 2>&1
+              fail "Gateway 健康检查失败 (unhealthy)"
+              ;;
+            starting|no-health) : ;;
+            *)
+              docker logs cakeclaw-gateway --tail 30 2>&1
+              fail "Gateway 状态异常: ${HS}"
+              ;;
+          esac
+        done
+        if [ "${OC_READY}" != true ]; then
+          docker logs cakeclaw-gateway --tail 30 2>&1
+          fail "Gateway 未在 180s 内变为 healthy"
+        fi
         ;;
       *) : ;;
     esac
