@@ -920,6 +920,11 @@ api_ver = os.environ.get("P_API_VERSION", "")
 if ptype == "3":  # Azure: /openai/models?api-version=...
     base = url.rstrip("/")
     url = f"{base}/models?api-version={api_ver}"
+elif ptype == "4" and not os.environ.get("P_MODELS_URL", ""):
+    # OpenAI 兼容的交互配置收的是 baseUrl（通常以 /v1 结尾），模型列表在 /models。
+    # 非交互分支已做此拼接；这里保持一致，避免误请求 baseUrl 根路径。
+    base = url.rstrip("/")
+    url = base if base.endswith("/models") else f"{base}/models"
 
 if not url:
     sys.exit(0)
