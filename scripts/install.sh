@@ -43,17 +43,19 @@ prompt() {
 # 等待 Gateway 容器 healthy（与 compose healthcheck 对齐，覆盖 start_period 120s）。
 # 不只看容器 Up（Up 可能仍 starting），而看 docker inspect Health.Status；异常则 fail。
 verify_control_ui() {
-  local url
-  if [ -n "${DOMAIN}" ]; then
-    url="https://${DOMAIN}/"
-  else
-    url="http://127.0.0.1:8080/"
+  # OpenClaw 的远程浏览器设备认证要求安全上下文；公网 HTTP 页面即使返回 200，
+  # 也无法完成 Control UI WebSocket 认证。因此无域名部署不把 HTTP 当作控制台验收。
+  if [ -z "${DOMAIN}" ]; then
+    info "未配置 HTTPS 域名：Gateway / Telegram 可正常运行；公网 HTTP Control UI 不受支持"
+    info "控制台请使用 SSH 隧道（http://127.0.0.1:${GATEWAY_PORT}/）或 Tailscale Serve"
+    return 0
   fi
+  local url="https://${DOMAIN}/"
   local status
   status="$(curl -ksS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 "${url}" || true)"
   case "${status}" in
-    200) ok "控制台可访问 (${url})" ;;
-    *) fail "控制台不可访问 (${url}, HTTP ${status:-000})；请检查 Nginx 上游与 Gateway 日志，部署未完成" ;;
+    200) ok "HTTPS 控制台可访问 (${url})" ;;
+    *) info "HTTPS 控制台验收失败 (${url}, HTTP ${status:-000})；Gateway 部署保留，请检查 DNS、证书与 443 端口" ;;
   esac
 }
 
@@ -144,7 +146,8 @@ DOMAIN="${DOMAIN:-}"
 if $INTERACTIVE && [ -z "$DOMAIN" ]; then
   echo ""
   echo "  可选：输入已解析到本机的域名以启用 HTTPS（例如 claw.example.com）。"
-  echo "  直接回车则使用 HTTP + 公网 IP:8080。"
+  echo "  直接回车仍可部署 Gateway、模型和 Telegram，但公网 HTTP 不能完成 Control UI 设备认证。"
+  echo "  无域名时请通过 SSH 隧道或 Tailscale 访问控制台。"
   prompt "  控制台域名（可留空）: " DOMAIN
   DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]')"
   if [ -n "$DOMAIN" ] && ! printf '%s' "$DOMAIN" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$'; then
@@ -1358,11 +1361,10 @@ echo -e "${GREEN}  cakeclaw 部署完成${NC}"
 echo "========================================"
 echo "  Gateway : 127.0.0.1:${GATEWAY_PORT}"
 if [ -n "$DOMAIN" ]; then
-  echo "  控制台  : https://${DOMAIN}"
+  echo "  HTTPS 控制台 : https://${DOMAIN}"
 else
-  # 直接获取本机外网 IP 显示完整 URL
-  PUBLIC_IP=$(curl -s --connect-timeout 3 https://ipinfo.io/ip 2>/dev/null || hostname -I | awk '{print $1}')
-  echo "  控制台  : http://${PUBLIC_IP}:8080"
+  echo "  公网 Control UI : 未启用（远程 HTTP 无法完成设备认证）"
+  echo "  本地控制台     : SSH 隧道后打开 http://127.0.0.1:${GATEWAY_PORT}/"
 fi
 echo ""
 echo "  下一步："
