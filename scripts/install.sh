@@ -324,7 +324,7 @@ if [ ! -f /data/state/openclaw.json ]; then
   "gateway": {
     "mode": "local",
     "port": 18789,
-    "bind": "loopback"
+    "bind": "lan"
   }
 }
 GWCONF
