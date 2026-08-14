@@ -533,6 +533,32 @@ else
   ok "Nginx 配置已存在，跳过覆盖（保留用户配置）"
 fi
 
+# Control UI 会以浏览器页面的完整 Origin 发起 WebSocket 握手。Gateway 默认拒绝
+# 未列入 allowedOrigins 的远程来源；Docker/Nginx 反代部署必须显式写入该来源。
+if [ -n "$DOMAIN" ]; then
+  CONTROL_UI_ORIGIN="https://${DOMAIN}"
+else
+  CONTROL_UI_IP="$(curl -4 -fsS --connect-timeout 5 --max-time 10 https://ipinfo.io/ip 2>/dev/null || hostname -I | awk '{print $1}')"
+  CONTROL_UI_ORIGIN="http://${CONTROL_UI_IP}:8080"
+fi
+CONTROL_UI_ORIGIN="$CONTROL_UI_ORIGIN" python3 - /data/state/openclaw.json << 'PYEOF'
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:\n    cfg = json.load(f)\ngateway = cfg.setdefault("gateway", {})
+ui = gateway.setdefault("controlUi", {})
+origin = os.environ["CONTROL_UI_ORIGIN"]
+origins = ui.setdefault("allowedOrigins", [])
+if origin not in origins:
+    origins.append(origin)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as f:\n    json.dump(cfg, f, indent=2, ensure_ascii=False)\n    f.write("\n")
+os.replace(tmp, path)
+os.chown(path, 1000, 1000)
+os.chmod(path, 0o600)
+PYEOF
+NEED_RESTART=true
+ok "Control UI 来源已允许: ${CONTROL_UI_ORIGIN}"
+
 # ── 8. SOUL + AGENTS ──
 step "8. Agent 策略"
 cp "$PROJECT_DIR/templates/SOUL.md" /data/workspace/SOUL.md 2>/dev/null || cat > /data/workspace/SOUL.md << 'SOUL'
