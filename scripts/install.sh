@@ -30,8 +30,12 @@ fi
 
 prompt() {
   local message="$1" variable="$2" value=""
-  if ! IFS= read -r -p "${message}" value < "${PROMPT_INPUT}"; then
-    value=""
+  # stdin 本身是 TTY 时直接继承 FD 0；不要重新打开 /dev/stdin，部分移动 SSH
+  # 环境会因此显示提示却无法接收键盘输入。仅重定向 stdin 时读取控制终端。
+  if [ "${PROMPT_INPUT}" = "/dev/tty" ]; then
+    IFS= read -r -p "${message}" value < /dev/tty || value=""
+  else
+    IFS= read -r -p "${message}" value || value=""
   fi
   printf -v "${variable}" '%s' "${value}"
 }
