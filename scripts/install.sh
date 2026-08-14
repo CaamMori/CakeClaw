@@ -18,20 +18,23 @@ step() { echo ""; echo -e "${GREEN}── ${1} ──${NC}"; }
 
 # ── 0. 参数解析 ──
 PHASE2=true; PHASE3=true
+CODEX_FIX=false
 HELP=false
 for arg in "$@"; do
   case "$arg" in
     --no-phase2) PHASE2=false ;;
     --no-phase3) PHASE3=false ;;
+    --with-codex-fix) CODEX_FIX=true ;;
     --help|-h)   HELP=true ;;
-    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --help" ;;
+    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --help" ;;
   esac
 done
 if $HELP; then
   echo "用法: sudo ./scripts/install.sh [选项]"
-  echo "  --no-phase2  跳过自愈/监控 (watchdog/trends/cert-check)"
-  echo "  --no-phase3  跳过审计 (audit/kbase)"
-  echo "  --help       显示此帮助"
+  echo "  --no-phase2       跳过自愈/监控 (watchdog/trends/cert-check)"
+  echo "  --no-phase3       跳过审计 (audit/kbase)"
+  echo "  --with-codex-fix  启用 Codex Responses 修复（挂载 dist 补丁 + env 白名单）"
+  echo "  --help            显示此帮助"
   exit 0
 fi
 
@@ -66,6 +69,14 @@ SSH_PORT="${SSH_PORT:-22}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 CONN_LIMIT="${CONN_LIMIT:-15}"
 SWAP_SIZE="${SWAP_SIZE:-2G}"
+# Codex Responses 修复（可选）：env 白名单方案，见 patches/ 与 README
+# 启用方式：install.sh 传 --with-codex-fix，或 .env 里 CODEX_FIX=1。二者等价。
+if [ "${CODEX_FIX:-}" = "1" ]; then
+  CODEX_FIX=true
+fi
+CODEX_FIX_PATCH_SRC="${CODEX_FIX_PATCH_SRC:-$PROJECT_DIR/patches/openai-transport-stream-D1R-kt0Q.js}"
+CODEX_FIX_PATCH_DST="${CODEX_FIX_PATCH_DST:-/app/dist/openai-transport-stream-D1R-kt0Q.js}"
+CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS:-}"
 
 step "0. 系统检测"
 echo "OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -255,6 +266,20 @@ if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ] || [ "$OPENCLAW_GATEWAY_TOKEN" = "***" ]
   fi
 fi
 cp "$PROJECT_DIR/.env" /data/etc/openclaw/runtime.env
+# Codex Responses 修复（可选）：把 env 白名单写入 runtime.env，让指定 provider 走
+# Codex Responses 路径。provider 名由 CODEX_RESPONSES_PROVIDERS 指定（逗号分隔）。
+# 幂等：先删旧行再去重，避免重跑 install.sh 时重复追加。
+if $CODEX_FIX; then
+  grep -v '^OPENCLAW_CODEX_RESPONSES_PROVIDERS=' /data/etc/openclaw/runtime.env > /data/etc/openclaw/runtime.env.tmp 2>/dev/null || true
+  if [ -n "${CODEX_RESPONSES_PROVIDERS}" ]; then
+    echo "OPENCLAW_CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}" >> /data/etc/openclaw/runtime.env.tmp
+    mv /data/etc/openclaw/runtime.env.tmp /data/etc/openclaw/runtime.env
+    info "已写入 OPENCLAW_CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}"
+  else
+    mv /data/etc/openclaw/runtime.env.tmp /data/etc/openclaw/runtime.env
+    info "未设置 CODEX_RESPONSES_PROVIDERS，稍后在 provider 配置后手动填入"
+  fi
+fi
 chmod 600 /data/etc/openclaw/runtime.env
 chown -R 1000:1000 /data/state /data/workspace 2>/dev/null || true
 ok "密钥已写入"
@@ -275,6 +300,60 @@ if grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' "${COMPOSE_FILE}"; then
   fail "docker-compose 生成失败：存在未替换的占位符，请同步 envsubst 变量列表。残留: $(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' "${COMPOSE_FILE}" | sort -u | tr '\n' ' ')"
 fi
 chmod 600 "${COMPOSE_FILE}"
+
+# Codex Responses 修复（可选）：把 dist 补丁文件复制到持久化目录并注入 compose 挂载。
+# 补丁 = 官方 dist 文件（2026.7.1）的第 793 行白名单从硬编码改为读环境变量
+# OPENCLAW_CODEX_RESPONSES_PROVIDERS。不硬编码任何 provider 名。
+# 未启用 --with-codex-fix 时完全不碰 compose，与默认部署完全一致。
+if $CODEX_FIX; then
+  [ -f "${CODEX_FIX_PATCH_SRC}" ] || fail "Codex 修复补丁文件不存在: ${CODEX_FIX_PATCH_SRC}"
+  mkdir -p /data/etc/openclaw/patches
+  cp "${CODEX_FIX_PATCH_SRC}" /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
+  chmod 644 /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
+  # 用 python 往 volumes 段末尾插入一行 bind mount（源=宿主机持久化文件，目标=容器 dist 文件）
+  CODEX_MOUNT_SRC="/data/etc/openclaw/patches/$(basename "${CODEX_FIX_PATCH_DST}")" \
+  CODEX_MOUNT_DST="${CODEX_FIX_PATCH_DST}" \
+  python3 - "${COMPOSE_FILE}" << 'PYEOF'
+import sys, os, tempfile
+path = sys.argv[1]
+mount_src = os.environ["CODEX_MOUNT_SRC"]
+mount_dst = os.environ["CODEX_MOUNT_DST"]
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+new_lines = []
+injected = False
+volumes_key_idx = None
+for i, line in enumerate(lines):
+    if not injected and line.strip() == "volumes:":
+        volumes_key_idx = i
+    new_lines.append(line)
+# 找到 volumes: 段内最后一个以 "  - " 开头的挂载行，在其后插入新挂载
+if volumes_key_idx is not None:
+    insert_after = None
+    for j in range(volumes_key_idx + 1, len(new_lines)):
+        nl = new_lines[j]
+        if nl.startswith("    ") and not nl.strip() == "":
+            if nl.strip().startswith("-"):
+                insert_after = j
+            else:
+                break
+        elif nl.strip() == "":
+            break
+        else:
+            break
+    if insert_after is None:
+        insert_after = volumes_key_idx
+    indent = "      "
+    new_lines.insert(insert_after + 1, indent + "- " + mount_src + ":" + mount_dst + "\n")
+    injected = True
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(new_lines)
+print("injected mount" if injected else "ERROR: volumes section not found")
+PYEOF
+  ok "Codex 修复已启用（挂载 ${CODEX_FIX_PATCH_DST}）"
+else
+  info "未启用 Codex 修复（--with-codex-fix 未指定）"
+fi
 
 docker compose -f "${COMPOSE_FILE}" up -d 2>&1 || fail "Gateway 启动失败"
 
