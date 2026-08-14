@@ -16,6 +16,38 @@ ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
 info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
 step() { echo ""; echo -e "${GREEN}── ${1} ──${NC}"; }
 
+# 等待 Gateway 容器 healthy（与 compose healthcheck 对齐，覆盖 start_period 120s）。
+# 不只看容器 Up（Up 可能仍 starting），而看 docker inspect Health.Status；异常则 fail。
+wait_gateway_ready() {
+  info "等待 Gateway 就绪 (max 180s，覆盖 start_period 120s + healthcheck)..."
+  local READY=false
+  local HS
+  for i in $(seq 1 36); do
+    sleep 5
+    HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
+    case "${HS}" in
+      healthy)
+        ok "Gateway 已就绪 (healthy, ${i}x5s)"
+        READY=true
+        break
+        ;;
+      unhealthy)
+        docker logs cakeclaw-gateway --tail 30 2>&1
+        fail "Gateway 健康检查失败 (unhealthy)"
+        ;;
+      starting|no-health) : ;;
+      *)
+        docker logs cakeclaw-gateway --tail 30 2>&1
+        fail "Gateway 状态异常: ${HS}"
+        ;;
+    esac
+  done
+  if [ "${READY}" != true ]; then
+    docker logs cakeclaw-gateway --tail 30 2>&1
+    fail "Gateway 未在 180s 内变为 healthy"
+  fi
+}
+
 # ── 0. 参数解析 ──
 PHASE2=true; PHASE3=true
 CODEX_FIX=false
@@ -384,42 +416,20 @@ PYEOF
   else
     ok "Codex 修复已启用（挂载 ${CODEX_FIX_PATCH_DST}）"
   fi
+  # 补丁挂载需重启才生效；打标记，由 12.8 收尾统一重启（避免此处与后续配置改动重复重启）
+  NEED_RESTART=true
 else
   info "未启用 Codex 修复（--with-codex-fix / --with-codex-fix-b 未指定）"
 fi
 
 docker compose -f "${COMPOSE_FILE}" up -d 2>&1 || fail "Gateway 启动失败"
 
-info "等待 Gateway 就绪 (max 180s，覆盖 start_period 120s + healthcheck)..."
-# 不只等容器 Up（Up 可能仍是 starting，尤其冷启动/大镜像），
-# 而等 docker inspect Health.Status == healthy，与 compose 里的 healthcheck 对齐。
-READY=false
-for i in $(seq 1 36); do
-  sleep 5
-  HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
-  case "${HS}" in
-    healthy)
-      ok "Gateway 已就绪 (healthy, ${i}x5s)"
-      READY=true
-      break
-      ;;
-    unhealthy)
-      docker logs cakeclaw-gateway --tail 30 2>&1
-      fail "Gateway 健康检查失败 (unhealthy)"
-      ;;
-    starting|no-health)
-      # 继续等待；no-health 可能是 healthcheck 还没开始上报
-      ;;
-    *)
-      # 容器没了或异常退出
-      docker logs cakeclaw-gateway --tail 30 2>&1
-      fail "Gateway 状态异常: ${HS}"
-      ;;
-  esac
-done
-if [ "${READY}" != true ]; then
-  docker logs cakeclaw-gateway --tail 30 2>&1
-  fail "Gateway 未在 180s 内变为 healthy"
+# 若无后续配置改动（未启用 Codex 补丁），在此等待 Gateway healthy；
+# 若已启用 Codex 补丁（NEED_RESTART=true），则只拉起容器、跳过等待，由 12.8 统一重启并确认 healthy。
+if $NEED_RESTART; then
+  info "已启用 Codex 补丁，暂不等待 healthy，将由 12.8 收尾统一重启确认"
+else
+  wait_gateway_ready
 fi
 
 # ── 7. Nginx ──
@@ -1165,31 +1175,7 @@ if $NEED_RESTART; then
   step "12.8 重启 Gateway 生效"
   info "检测到配置/补丁改动，重启 Gateway 使其生效..."
   docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
-  OC_READY=false
-  for i in $(seq 1 36); do
-    sleep 5
-    HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
-    case "${HS}" in
-      healthy)
-        ok "Gateway 已就绪 (healthy, ${i}x5s)"
-        OC_READY=true
-        break
-        ;;
-      unhealthy)
-        docker logs cakeclaw-gateway --tail 30 2>&1
-        fail "Gateway 健康检查失败 (unhealthy)"
-        ;;
-      starting|no-health) : ;;
-      *)
-        docker logs cakeclaw-gateway --tail 30 2>&1
-        fail "Gateway 状态异常: ${HS}"
-        ;;
-    esac
-  done
-  if [ "${OC_READY}" != true ]; then
-    docker logs cakeclaw-gateway --tail 30 2>&1
-    fail "Gateway 未在 180s 内变为 healthy"
-  fi
+  wait_gateway_ready
 fi
 
 # ── 完成 ──
