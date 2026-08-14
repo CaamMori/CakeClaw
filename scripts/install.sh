@@ -52,7 +52,6 @@ wait_gateway_ready() {
 PHASE2=true; PHASE3=true
 CODEX_FIX=false
 CODEX_FIX_B=false
-TELEGRAM_ENABLE=false
 OPENCODE_INSTALL=false
 HELP=false
 NEED_RESTART=false
@@ -62,20 +61,16 @@ for arg in "$@"; do
     --no-phase3) PHASE3=false ;;
     --with-codex-fix) CODEX_FIX=true ;;
     --with-codex-fix-b) CODEX_FIX_B=true ;;
-    --with-telegram) TELEGRAM_ENABLE=true ;;
-    --with-opencode) OPENCODE_INSTALL=true ;;
     --help|-h)   HELP=true ;;
-    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --with-telegram --with-opencode --help" ;;
+    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --help" ;;
   esac
 done
 if $HELP; then
   echo "用法: sudo ./scripts/install.sh [选项]"
-  echo "  --no-phase2         跳过自愈/监控 (watchdog/trends/cert-check)"
-  echo "  --no-phase3         跳过审计 (audit/kbase)"
-  echo "  --with-codex-fix    启用 Codex 修复（挂载 dist 补丁 + env 白名单，需 api 已是 Codex 专属值）"
-  echo "  --with-codex-fix-b  启用 Codex 修复 B（额外支持 api=openai-responses，改 dist 两处）"
-  echo "  --with-telegram     启用 Telegram 机器人接入（需 TELEGRAM_BOT_TOKEN）"
-  echo "  --with-opencode     安装 OpenCode（终端 AI 编程代理，opencode.ai）"
+  echo "  --no-phase2         跳过自愈/监控"
+  echo "  --no-phase3         跳过审计"
+  echo "  --with-codex-fix    启用 Codex 修复（方案 A）"
+  echo "  --with-codex-fix-b  启用 Codex 修复（方案 B）"
   echo "  --help              显示此帮助"
   exit 0
 fi
@@ -125,8 +120,7 @@ CODEX_FIX_B_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC:-$PROJECT_DIR/patches/openai-tran
 CODEX_FIX_PATCH_DST="${CODEX_FIX_PATCH_DST:-/app/dist/openai-transport-stream-codex.js}"
 CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS:-}"
 # Telegram 机器人接入（可选）：见 README
-# 启用方式：install.sh 传 --with-telegram，或 .env 里 TELEGRAM_ENABLE=1。二者等价。
-if [ "${TELEGRAM_ENABLE:-}" = "1" ]; then TELEGRAM_ENABLE=true; fi
+# 交互环境默认询问；非交互环境用 TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOW_FROM 环境变量。
 if [ "${OPENCODE_INSTALL:-}" = "1" ]; then OPENCODE_INSTALL=true; fi
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_ALLOW_FROM="${TELEGRAM_ALLOW_FROM:-}"
@@ -1121,19 +1115,15 @@ PYEOF
   NEED_RESTART=true
 }
 
-if $TELEGRAM_ENABLE; then
-  # 交互环境则引导输入；非交互则用环境变量自动配置
-  if [ -t 0 ]; then
-    configure_telegram
-  else
-    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-      configure_telegram_noninteractive
-    else
-      info "已指定 --with-telegram 但未设置 TELEGRAM_BOT_TOKEN（非交互环境无法输入），跳过"
-    fi
-  fi
+# 默认交互询问；非交互环境则用环境变量自动配置。
+if [ -t 0 ]; then
+  configure_telegram
 else
-  info "未启用 Telegram 接入（--with-telegram 未指定）"
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    configure_telegram_noninteractive
+  else
+    info "非交互环境，且未设置 TELEGRAM_BOT_TOKEN，跳过 Telegram 自动配置"
+  fi
 fi
 
 # ── 12.7 OpenCode 安装（可选）──
@@ -1156,16 +1146,17 @@ configure_opencode() {
   esac
 }
 
-if $OPENCODE_INSTALL; then
-  if [ -t 0 ]; then
-    configure_opencode
-  else
+# 默认交互询问；非交互环境则用 OPENCODE_INSTALL=1 环境变量触发。
+if [ -t 0 ]; then
+  configure_opencode
+else
+  if $OPENCODE_INSTALL; then
     info "非交互环境，OPENCODE_INSTALL=1，正在安装 OpenCode..."
     curl -fsSL https://opencode.ai/install | bash 2>&1 | tail -5
     ok "OpenCode 安装完成"
+  else
+    info "非交互环境，且未设置 OPENCODE_INSTALL=1，跳过 OpenCode 安装"
   fi
-else
-  info "未启用 OpenCode 安装（--with-opencode 未指定）"
 fi
 
 # ── 12.8 重启生效（收尾） ──
