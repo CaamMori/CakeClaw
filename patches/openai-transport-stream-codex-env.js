@@ -2060,7 +2060,10 @@ function isNativeOpenAICodexResponsesBaseUrl(baseUrl) {
 	}
 }
 function usesNativeOpenAICodexResponsesBackend(model) {
-	return isOpenAICodexResponsesModel(model) && isNativeOpenAICodexResponsesBaseUrl(model.baseUrl);
+	// Custom Codex-compatible gateways are intentionally whitelisted through
+	// OPENCLAW_CODEX_RESPONSES_PROVIDERS. They need the same payload constraints
+	// as chatgpt.com; otherwise OpenClaw sends parameters those gateways reject.
+	return isOpenAICodexResponsesModel(model);
 }
 const OPENAI_CODEX_RESPONSES_UNSUPPORTED_PARAMS = [
 	"max_output_tokens",
