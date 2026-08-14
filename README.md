@@ -54,6 +54,38 @@ CODEX_RESPONSES_PROVIDERS=caner
 > 也可不走命令行参数，而在 `.env` 里设 `CODEX_FIX=1` 或 `CODEX_FIX_B=1`。
 > 两开关互斥，不能同时开启。实现细节见 `patches/` 与 `docs/`。
 
+### 可选：Telegram 机器人接入（--with-telegram）
+
+想直接在同 Telegram 里与 agent 对话，在安装时开启 Telegram 接入：
+
+```bash
+sudo ./scripts/install.sh --with-telegram
+```
+
+安装过程中会交互式引导你输入：
+
+1. **Bot Token** — 去 Telegram 找 @BotFather → `/newbot` 创建机器人，复制 token。
+2. **账号 ID**（allowFrom）— 允许访问的 Telegram 账号数字 ID，多个用逗号分隔。
+
+> 查自己的 Telegram 账号 ID：
+> - 对机器人发消息后看 `openclaw logs --follow` 里的 `from.id`
+> - 或用官方 Bot API：`curl "https://api.telegram.org/bot<token>/getUpdates"`
+> - 或第三方 @userinfobot（不推荐，涉及隐私）
+
+安全说明：token 不会写进 `openclaw.json` 明文，而是存到独立文件
+`/data/etc/openclaw/telegram-bot-token`（`chmod 600`），配置里用 `tokenFile` 引用。
+若安装时未填账号 ID，会改用 `dmPolicy: "pairing"`（首次私聊需 approve）；
+填了 ID 则用 `dmPolicy: "allowlist"`（仅名单内账号可触发）。
+
+非交互一键部署（CI / 脚本）可预填环境变量：
+
+```bash
+# .env 里
+TELEGRAM_ENABLE=1
+TELEGRAM_BOT_TOKEN=123:abc...
+TELEGRAM_ALLOW_FROM=8524071159
+```
+
 部署完成后：
 
 `install.sh` 末尾会交互式引导你配置模型 provider（可直接回车跳过）：

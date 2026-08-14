@@ -20,6 +20,7 @@ step() { echo ""; echo -e "${GREEN}── ${1} ──${NC}"; }
 PHASE2=true; PHASE3=true
 CODEX_FIX=false
 CODEX_FIX_B=false
+TELEGRAM_ENABLE=false
 HELP=false
 for arg in "$@"; do
   case "$arg" in
@@ -27,8 +28,9 @@ for arg in "$@"; do
     --no-phase3) PHASE3=false ;;
     --with-codex-fix) CODEX_FIX=true ;;
     --with-codex-fix-b) CODEX_FIX_B=true ;;
+    --with-telegram) TELEGRAM_ENABLE=true ;;
     --help|-h)   HELP=true ;;
-    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --help" ;;
+    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --with-telegram --help" ;;
   esac
 done
 if $HELP; then
@@ -37,6 +39,7 @@ if $HELP; then
   echo "  --no-phase3         跳过审计 (audit/kbase)"
   echo "  --with-codex-fix    启用 Codex 修复（挂载 dist 补丁 + env 白名单，需 api 已是 Codex 专属值）"
   echo "  --with-codex-fix-b  启用 Codex 修复 B（额外支持 api=openai-responses，改 dist 两处）"
+  echo "  --with-telegram     启用 Telegram 机器人接入（需 TELEGRAM_BOT_TOKEN）"
   echo "  --help              显示此帮助"
   exit 0
 fi
@@ -85,6 +88,11 @@ CODEX_FIX_PATCH_SRC="${CODEX_FIX_PATCH_SRC:-$PROJECT_DIR/patches/openai-transpor
 CODEX_FIX_B_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC:-$PROJECT_DIR/patches/openai-transport-stream-codex-openai-responses.js}"
 CODEX_FIX_PATCH_DST="${CODEX_FIX_PATCH_DST:-/app/dist/openai-transport-stream-codex.js}"
 CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS:-}"
+# Telegram 机器人接入（可选）：见 README
+# 启用方式：install.sh 传 --with-telegram，或 .env 里 TELEGRAM_ENABLE=1。二者等价。
+if [ "${TELEGRAM_ENABLE:-}" = "1" ]; then TELEGRAM_ENABLE=true; fi
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_ALLOW_FROM="${TELEGRAM_ALLOW_FROM:-}"
 
 step "0. 系统检测"
 echo "OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -880,6 +888,120 @@ else
   else
     info "非交互环境，且未设置 CAKECLAW_PROVIDER_BASE_URL，跳过模型 provider 配置"
   fi
+fi
+
+# ── 12.6 Telegram 机器人接入（可选）──
+# 引导用户输入 Telegram bot token（来自 @BotFather）和一个或多个账号 ID，然后 merge 进
+# openclaw.json 的 channels.telegram 段（幂等，不覆盖已有字段）。token 不写明文进 json，
+# 而是写到一个独立文件（/data/etc/openclaw/telegram-bot-token），json 里用 tokenFile 引用。
+step "12.6 Telegram 机器人接入"
+configure_telegram() {
+  GWJSON="/data/state/openclaw.json"
+  [ -f "${GWJSON}" ] || { info "openclaw.json 不存在，跳过 Telegram 配置"; return 0; }
+
+  echo ""
+  echo "  配置 Telegram 机器人？ 直接回车跳过（稍后可在控制台 Config 手动配）"
+  read -r -p "  是否配置 (y/N): " DO_TG
+  case "${DO_TG}" in
+    y|Y|yes|YES) : ;;
+    *) info "跳过 Telegram 配置"; return 0 ;;
+  esac
+
+  echo ""
+  echo "  提示：先在同 Telegram 里找 @BotFather → /newbot 创建机器人，拿到 token。"
+  read -r -p "  Bot Token（形如 123456:ABC...）: " TG_TOKEN
+  [ -n "${TG_TOKEN}" ] || { info "未填 Bot Token，跳过"; return 0; }
+
+  # 账号 ID（allowFrom）：可单个或多个（逗号分隔/空格分隔）
+  read -r -p "  允许访问的 Telegram 账号 ID（多个用逗号分隔，见 README 查 ID 方法）: " TG_ALLOW
+  TG_ALLOW="$(echo "${TG_ALLOW}" | tr ',' ' ')"
+  # 规整为逗号分隔的 id 列表
+  TG_ALLOW_JSON=$(echo "${TG_ALLOW}" | tr ' ' '\n' | sed '/^[[:space:]]*$/d' | paste -sd',' -)
+
+  # 写 token 到独立文件（不进 json），并 merge channels.telegram 段
+  mkdir -p /data/etc/openclaw
+  printf '%s' "${TG_TOKEN}" > /data/etc/openclaw/telegram-bot-token
+  chmod 600 /data/etc/openclaw/telegram-bot-token
+
+  TG_ALLOW_JSON="${TG_ALLOW_JSON}" python3 - "${GWJSON}" << 'PYEOF'
+import json, sys, os, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+ch = cfg.setdefault("channels", {})
+tg = ch.setdefault("telegram", {})
+tg["enabled"] = True
+tg["tokenFile"] = "/data/etc/openclaw/telegram-bot-token"
+# dmPolicy：未显式配置时默认 allowlist（安全）；有 allowFrom 则 allowlist
+allow = os.environ.get("TG_ALLOW_JSON", "").strip()
+if allow:
+    ids = [x.strip() for x in allow.split(",") if x.strip()]
+    tg["allowFrom"] = ids
+    tg["dmPolicy"] = "allowlist"
+else:
+    # 未填 ID：仍启用但用 pairing（首次 DM 需 approve），更安全
+    tg["dmPolicy"] = "pairing"
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+print("[configured telegram]")
+PYEOF
+  ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
+}
+
+# 非交互自动配置：通过 TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOW_FROM 环境变量（可写在 .env）注入。
+configure_telegram_noninteractive() {
+  GWJSON="/data/state/openclaw.json"
+  [ -f "${GWJSON}" ] || { info "openclaw.json 不存在，跳过 Telegram 配置"; return 0; }
+  local TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+  [ -n "${TG_TOKEN}" ] || { info "未设置 TELEGRAM_BOT_TOKEN，跳过 Telegram 自动配置"; return 0; }
+
+  mkdir -p /data/etc/openclaw
+  printf '%s' "${TG_TOKEN}" > /data/etc/openclaw/telegram-bot-token
+  chmod 600 /data/etc/openclaw/telegram-bot-token
+
+  TG_ALLOW_JSON="${TELEGRAM_ALLOW_FROM:-}" python3 - "${GWJSON}" << 'PYEOF'
+import json, sys, os, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+ch = cfg.setdefault("channels", {})
+tg = ch.setdefault("telegram", {})
+tg["enabled"] = True
+tg["tokenFile"] = "/data/etc/openclaw/telegram-bot-token"
+allow = os.environ.get("TG_ALLOW_JSON", "").strip()
+allow = allow.replace(" ", ",")  # 兼容空格分隔
+if allow:
+    ids = [x.strip() for x in allow.split(",") if x.strip()]
+    tg["allowFrom"] = ids
+    tg["dmPolicy"] = "allowlist"
+else:
+    tg["dmPolicy"] = "pairing"
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+print("[configured telegram]")
+PYEOF
+  ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
+}
+
+if $TELEGRAM_ENABLE; then
+  # 交互环境则引导输入；非交互则用环境变量自动配置
+  if [ -t 0 ]; then
+    configure_telegram
+  else
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+      configure_telegram_noninteractive
+    else
+      info "已指定 --with-telegram 但未设置 TELEGRAM_BOT_TOKEN（非交互环境无法输入），跳过"
+    fi
+  fi
+else
+  info "未启用 Telegram 接入（--with-telegram 未指定）"
 fi
 
 # ── 完成 ──
