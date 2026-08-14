@@ -1095,6 +1095,23 @@ except Exception:
     sys.exit(0)
 PYEOF
 
+  # Codex /models 返回的候选不等于当前 ChatGPT Subscription 账号可调用的模型。
+  # 在展示菜单前逐一真实探测，只保留成功响应的模型。
+  if [ "${CODECX_DETECTED:-false}" = "true" ] && [ -s /tmp/cakeclaw-models.txt ]; then
+    : > /tmp/cakeclaw-codex-models.txt
+    while IFS= read -r model_id; do
+      [ -n "${model_id}" ] || continue
+      info "验证 Codex 模型可用性: ${model_id}"
+      if probe_codex_responses_model "${P_URL}" "${P_KEY}" "${model_id}"; then
+        printf '%s\n' "${model_id}" >> /tmp/cakeclaw-codex-models.txt
+      else
+        info "已过滤当前账号不可用的 Codex 模型: ${model_id}"
+      fi
+    done < /tmp/cakeclaw-models.txt
+    mv /tmp/cakeclaw-codex-models.txt /tmp/cakeclaw-models.txt
+    [ -s /tmp/cakeclaw-models.txt ] || { info "没有通过当前 Codex 账号验证的模型，取消 provider"; rm -f /tmp/cakeclaw-models.txt; return 0; }
+  fi
+
   # 让用户勾选模型
   if [ -s /tmp/cakeclaw-models.txt ]; then
     echo ""
