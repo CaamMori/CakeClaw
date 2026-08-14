@@ -16,7 +16,7 @@ cd cakeclaw
 sudo ./scripts/install.sh   # 12 步全自动部署
 ```
 
-### 可选：Codex Responses 修复（--with-codex-fix）
+### 可选：Codex Responses 修复
 
 如果你的模型 provider 指向 ChatGPT Subscription / Codex（type=57）后端（只支持 `/v1/responses`），
 OpenClaw 会把 system prompt 当成 `input[].role="system"` 发送而被后端拒绝：
@@ -25,21 +25,34 @@ OpenClaw 会把 system prompt 当成 `input[].role="system"` 发送而被后端�
 400 System messages are not allowed
 ```
 
-cakeclaw 提供一键开关修里它（bind mount 一个改好的 dist 文件 + 环境变量白名单，不重新 build 镜像）：
+cakeclaw 提供一键开关修好它（bind mount 一个改好的 dist 文件 + 环境变量白名单，不重新 build 镜像）。
+根据你的模型 `api` 取值，选一个开关：
+
+#### 方案 B（推荐，覆盖 `api: "openai-responses"`）
+
+绝大多数自定义 Codex 中转的把 provider `api` 写成 `openai-responses`。这种情况用：
+
+```bash
+sudo ./scripts/install.sh --with-codex-fix-b
+```
+
+#### Option C（仅 `api` 已是 Codex 专属值）
+
+若模型 `api` 已经是 `openai-chatgpt-responses` 或 `openclaw-openai-responses-transport`，用：
 
 ```bash
 sudo ./scripts/install.sh --with-codex-fix
 ```
 
-启用后，还需把对应 provider 的 `api` 配成 `openai-responses`，并指定 provider 白名单：
+启用后，指定 provider 白名单（两方案都要）：
 
 ```bash
 # .env 里（或安装后手动改 /data/etc/openclaw/runtime.env）
 CODEX_RESPONSES_PROVIDERS=caner
 ```
 
-> 也可不走命令行参数，而在 `.env` 里设 `CODEX_FIX=1` 达到同样效果。
-> 实现细节见 `patches/` 与 `docs/`。
+> 也可不走命令行参数，而在 `.env` 里设 `CODEX_FIX=1` 或 `CODEX_FIX_B=1`。
+> 两开关互斥，不能同时开启。实现细节见 `patches/` 与 `docs/`。
 
 部署完成后：
 

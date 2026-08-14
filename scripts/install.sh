@@ -19,22 +19,25 @@ step() { echo ""; echo -e "${GREEN}── ${1} ──${NC}"; }
 # ── 0. 参数解析 ──
 PHASE2=true; PHASE3=true
 CODEX_FIX=false
+CODEX_FIX_B=false
 HELP=false
 for arg in "$@"; do
   case "$arg" in
     --no-phase2) PHASE2=false ;;
     --no-phase3) PHASE3=false ;;
     --with-codex-fix) CODEX_FIX=true ;;
+    --with-codex-fix-b) CODEX_FIX_B=true ;;
     --help|-h)   HELP=true ;;
-    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --help" ;;
+    *) fail "未知参数: $arg。支持的参数: --no-phase2 --no-phase3 --with-codex-fix --with-codex-fix-b --help" ;;
   esac
 done
 if $HELP; then
   echo "用法: sudo ./scripts/install.sh [选项]"
-  echo "  --no-phase2       跳过自愈/监控 (watchdog/trends/cert-check)"
-  echo "  --no-phase3       跳过审计 (audit/kbase)"
-  echo "  --with-codex-fix  启用 Codex Responses 修复（挂载 dist 补丁 + env 白名单）"
-  echo "  --help            显示此帮助"
+  echo "  --no-phase2         跳过自愈/监控 (watchdog/trends/cert-check)"
+  echo "  --no-phase3         跳过审计 (audit/kbase)"
+  echo "  --with-codex-fix    启用 Codex 修复（挂载 dist 补丁 + env 白名单，需 api 已是 Codex 专属值）"
+  echo "  --with-codex-fix-b  启用 Codex 修复 B（额外支持 api=openai-responses，改 dist 两处）"
+  echo "  --help              显示此帮助"
   exit 0
 fi
 
@@ -69,13 +72,18 @@ SSH_PORT="${SSH_PORT:-22}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 CONN_LIMIT="${CONN_LIMIT:-15}"
 SWAP_SIZE="${SWAP_SIZE:-2G}"
-# Codex Responses 修复（可选）：env 白名单方案，见 patches/ 与 README
-# 启用方式：install.sh 传 --with-codex-fix，或 .env 里 CODEX_FIX=1。二者等价。
-if [ "${CODEX_FIX:-}" = "1" ]; then
-  CODEX_FIX=true
-fi
-CODEX_FIX_PATCH_SRC="${CODEX_FIX_PATCH_SRC:-$PROJECT_DIR/patches/openai-transport-stream-D1R-kt0Q.js}"
-CODEX_FIX_PATCH_DST="${CODEX_FIX_PATCH_DST:-/app/dist/openai-transport-stream-D1R-kt0Q.js}"
+# Codex Responses 修复（可选）：见 patches/ 与 README
+# 两种方案，二选一（切勿同时启用）：
+#   --with-codex-fix  （CODEX_FIX=1）   env 白名单方案，不改 api 判定，需模型 api 已是
+#                                     openai-chatgpt-responses / openclaw-openai-responses-transport
+#   --with-codex-fix-b（CODEX_FIX_B=1）改 dist 两处（含 api=openai-responses），无需模型 api 特殊值
+# 二者都依赖环境变量 OPENCLAW_CODEX_RESPONSES_PROVIDERS 指定 provider 名（不硬编码）。
+if [ "${CODEX_FIX:-}" = "1" ]; then CODEX_FIX=true; fi
+if [ "${CODEX_FIX_B:-}" = "1" ]; then CODEX_FIX_B=true; fi
+if $CODEX_FIX && $CODEX_FIX_B; then fail "--with-codex-fix 与 --with-codex-fix-b 不能同时启用"; fi
+CODEX_FIX_PATCH_SRC="${CODEX_FIX_PATCH_SRC:-$PROJECT_DIR/patches/openai-transport-stream-codex-env.js}"
+CODEX_FIX_B_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC:-$PROJECT_DIR/patches/openai-transport-stream-codex-openai-responses.js}"
+CODEX_FIX_PATCH_DST="${CODEX_FIX_PATCH_DST:-/app/dist/openai-transport-stream-codex.js}"
 CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS:-}"
 
 step "0. 系统检测"
@@ -268,8 +276,9 @@ fi
 cp "$PROJECT_DIR/.env" /data/etc/openclaw/runtime.env
 # Codex Responses 修复（可选）：把 env 白名单写入 runtime.env，让指定 provider 走
 # Codex Responses 路径。provider 名由 CODEX_RESPONSES_PROVIDERS 指定（逗号分隔）。
+# 两种方案（--with-codex-fix 与 --with-codex-fix-b）都需要这一步。
 # 幂等：先删旧行再去重，避免重跑 install.sh 时重复追加。
-if $CODEX_FIX; then
+if $CODEX_FIX || $CODEX_FIX_B; then
   grep -v '^OPENCLAW_CODEX_RESPONSES_PROVIDERS=' /data/etc/openclaw/runtime.env > /data/etc/openclaw/runtime.env.tmp 2>/dev/null || true
   if [ -n "${CODEX_RESPONSES_PROVIDERS}" ]; then
     echo "OPENCLAW_CODEX_RESPONSES_PROVIDERS=${CODEX_RESPONSES_PROVIDERS}" >> /data/etc/openclaw/runtime.env.tmp
@@ -302,13 +311,20 @@ fi
 chmod 600 "${COMPOSE_FILE}"
 
 # Codex Responses 修复（可选）：把 dist 补丁文件复制到持久化目录并注入 compose 挂载。
-# 补丁 = 官方 dist 文件（2026.7.1）的第 793 行白名单从硬编码改为读环境变量
-# OPENCLAW_CODEX_RESPONSES_PROVIDERS。不硬编码任何 provider 名。
-# 未启用 --with-codex-fix 时完全不碰 compose，与默认部署完全一致。
-if $CODEX_FIX; then
-  [ -f "${CODEX_FIX_PATCH_SRC}" ] || fail "Codex 修复补丁文件不存在: ${CODEX_FIX_PATCH_SRC}"
+# 两个方案选一个（互斥已在上方校验）：
+#   --with-codex-fix   → 用 env 白名单产物（不改 api 判定，需模型 api 已是 Codex 专属值）
+#   --with-codex-fix-b → 用 openai-responses 产物（额外支持 api=openai-responses）
+# 补丁均从官方 dist（2026.7.1）派生，provider 名不硬编码（由环境变量指定）。
+# 未启用任何方案时完全不碰 compose，与默认部署完全一致。
+if $CODEX_FIX || $CODEX_FIX_B; then
+  if $CODEX_FIX_B; then
+    CODEX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
+  else
+    CODEX_PATCH_SRC="${CODEX_FIX_PATCH_SRC}"
+  fi
+  [ -f "${CODEX_PATCH_SRC}" ] || fail "Codex 修复补丁文件不存在: ${CODEX_PATCH_SRC}"
   mkdir -p /data/etc/openclaw/patches
-  cp "${CODEX_FIX_PATCH_SRC}" /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
+  cp "${CODEX_PATCH_SRC}" /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
   chmod 644 /data/etc/openclaw/patches/"$(basename "${CODEX_FIX_PATCH_DST}")"
   # 用 python 往 volumes 段末尾插入一行 bind mount（源=宿主机持久化文件，目标=容器 dist 文件）
   CODEX_MOUNT_SRC="/data/etc/openclaw/patches/$(basename "${CODEX_FIX_PATCH_DST}")" \
@@ -350,9 +366,13 @@ with open(path, "w", encoding="utf-8") as f:
     f.writelines(new_lines)
 print("injected mount" if injected else "ERROR: volumes section not found")
 PYEOF
-  ok "Codex 修复已启用（挂载 ${CODEX_FIX_PATCH_DST}）"
+  if $CODEX_FIX_B; then
+    ok "Codex 修复 B 已启用（挂载 ${CODEX_FIX_PATCH_DST}，支持 api=openai-responses）"
+  else
+    ok "Codex 修复已启用（挂载 ${CODEX_FIX_PATCH_DST}）"
+  fi
 else
-  info "未启用 Codex 修复（--with-codex-fix 未指定）"
+  info "未启用 Codex 修复（--with-codex-fix / --with-codex-fix-b 未指定）"
 fi
 
 docker compose -f "${COMPOSE_FILE}" up -d 2>&1 || fail "Gateway 启动失败"
