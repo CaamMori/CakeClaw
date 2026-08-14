@@ -40,6 +40,31 @@ prompt() {
   printf -v "${variable}" '%s' "${value}"
 }
 
+# Codex/ChatGPT Subscription 中转的 /models 列表可能包含当前账号无权调用的模型。
+# 在写入 Provider 前做一次最小 Responses 请求；失败时不落盘无效配置。
+probe_codex_responses_model() {
+  local base_url="$1" api_key="$2" model_id="$3"
+  P_URL="${base_url}" P_KEY="${api_key}" P_MODEL="${model_id}" python3 - <<'PYEOF'
+import json, os, sys, urllib.error, urllib.request
+url = os.environ["P_URL"].rstrip("/") + "/responses"
+body = json.dumps({"model": os.environ["P_MODEL"], "input": "Reply with OK.", "max_output_tokens": 8}).encode()
+req = urllib.request.Request(url, data=body, method="POST", headers={
+    "Authorization": "Bearer " + os.environ["P_KEY"],
+    "Content-Type": "application/json",
+})
+try:
+    with urllib.request.urlopen(req, timeout=25) as response:
+        if 200 <= response.status < 300:
+            sys.exit(0)
+except urllib.error.HTTPError as error:
+    detail = error.read().decode("utf-8", errors="replace").replace("\n", " ")
+    print(f"HTTP {error.code}: {detail[:300]}", file=sys.stderr)
+except Exception as error:
+    print(f"{type(error).__name__}: {error}", file=sys.stderr)
+sys.exit(1)
+PYEOF
+}
+
 # 等待 Gateway 容器 healthy（与 compose healthcheck 对齐，覆盖 start_period 120s）。
 # 不只看容器 Up（Up 可能仍 starting），而看 docker inspect Health.Status；异常则 fail。
 verify_control_ui() {
@@ -1097,6 +1122,19 @@ PYEOF
   rm -f /tmp/cakeclaw-models.txt
 
   [ -n "${P_MODELS}" ] || { info "未选择任何模型，取消 provider"; return 0; }
+
+  # /models 能列出模型不代表 ChatGPT Subscription / Codex 账号有调用权限。
+  # 对选中的每一个 Responses 模型实际探测；任一失败均不写入 Provider，避免部署后才报错。
+  if [ "${CODECX_DETECTED:-false}" = "true" ]; then
+    for model_id in ${P_MODELS}; do
+      info "验证 Codex 模型可用性: ${model_id}"
+      if ! probe_codex_responses_model "${P_URL}" "${P_KEY}" "${model_id}"; then
+        info "Codex 模型 '${model_id}' 被当前账号或后端拒绝；Provider 未写入，请选择后端实际支持的模型后重试"
+        return 0
+      fi
+    done
+    ok "所选 Codex 模型均已通过 /v1/responses 实测"
+  fi
 
   P_NAME="${P_NAME}" P_URL="${P_URL}" P_KEY="${P_KEY}" P_API="${P_API}" P_MODELS="${P_MODELS}" \
     P_API_VERSION="${P_API_VERSION}" \
