@@ -41,6 +41,34 @@ echo "[4/4] 启动新容器..."
 cd "$PROJECT_DIR"
 export GATEWAY_PORT="${GATEWAY_PORT:-18789}" GATEWAY_IMAGE="${NEW_TAG}"
 export GATEWAY_MEM_LIMIT="${GATEWAY_MEM_LIMIT:-4g}" GATEWAY_CPU_LIMIT="${GATEWAY_CPU_LIMIT:-1}" GATEWAY_PID_LIMIT="${GATEWAY_PID_LIMIT:-1024}"
+TELEGRAM_TOKEN_DIR="/data/etc/openclaw/telegram"
+TELEGRAM_TOKEN_FILE="${TELEGRAM_TOKEN_DIR}/bot-token"
+LEGACY_TELEGRAM_TOKEN_FILE="/data/etc/openclaw/telegram-bot-token"
+# 迁移旧版扁平 Token 路径，且让容器内 node 用户可读取专用目录。
+install -d -o 1000 -g 1000 -m 700 "${TELEGRAM_TOKEN_DIR}"
+if [ -f "${LEGACY_TELEGRAM_TOKEN_FILE}" ] && [ ! -e "${TELEGRAM_TOKEN_FILE}" ]; then
+  install -o 1000 -g 1000 -m 600 "${LEGACY_TELEGRAM_TOKEN_FILE}" "${TELEGRAM_TOKEN_FILE}"
+fi
+if [ -f "${TELEGRAM_TOKEN_FILE}" ] && [ -f /data/state/openclaw.json ]; then
+  TELEGRAM_TOKEN_FILE="${TELEGRAM_TOKEN_FILE}" python3 - /data/state/openclaw.json << 'PYEOF'
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+tg = cfg.get("channels", {}).get("telegram")
+legacy = "/data/etc/openclaw/telegram-bot-token"
+if isinstance(tg, dict) and tg.get("tokenFile") == legacy:
+    tg["tokenFile"] = os.environ["TELEGRAM_TOKEN_FILE"]
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.chown(tmp, 1000, 1000)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    print("[OK] 已迁移 Telegram tokenFile 路径")
+PYEOF
+fi
 COMPOSE_FILE="/data/etc/openclaw/docker-compose.yml"
 envsubst '$GATEWAY_PORT $GATEWAY_IMAGE $GATEWAY_MEM_LIMIT $GATEWAY_CPU_LIMIT $GATEWAY_PID_LIMIT' \
   < "$PROJECT_DIR/docker-compose.yml" > "${COMPOSE_FILE}"

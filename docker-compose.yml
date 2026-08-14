@@ -8,6 +8,8 @@ services:
     volumes:
       - /data/workspace:/data/workspace
       - /data/state:/home/node/.openclaw
+      # Telegram Token 使用专用目录，避免把 runtime.env 暴露给容器。
+      - /data/etc/openclaw/telegram:/data/etc/openclaw/telegram:ro
     env_file:
       - /data/etc/openclaw/runtime.env
     environment:

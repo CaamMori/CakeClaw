@@ -175,9 +175,19 @@ CODEX_FIX_PATCH_DST="${CODEX_FIX_PATCH_DST:-/app/dist/openai-transport-stream-co
 CODEX_RESPONSES_PROVIDERS="${CODEX_RESPONSES_PROVIDERS:-}"
 # Telegram 机器人接入（可选）：见 README
 # 交互环境默认询问；非交互环境用 TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOW_FROM 环境变量。
+TELEGRAM_TOKEN_DIR="/data/etc/openclaw/telegram"
+TELEGRAM_TOKEN_FILE="${TELEGRAM_TOKEN_DIR}/bot-token"
 if [ "${OPENCODE_INSTALL:-}" = "1" ]; then OPENCODE_INSTALL=true; fi
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_ALLOW_FROM="${TELEGRAM_ALLOW_FROM:-}"
+# 重跑安装脚本会重新渲染 Compose 模板；在覆盖前记录已生效的 Codex 补丁，稍后恢复挂载并跳过交互。
+CODEX_PATCH_HOST_PATH="/data/etc/openclaw/patches/$(basename "${CODEX_FIX_PATCH_DST}")"
+CODEX_COMPOSE_FILE="/data/etc/openclaw/docker-compose.yml"
+CODEX_FIX_PREVIOUSLY_INSTALLED=false
+if [ -f "${CODEX_PATCH_HOST_PATH}" ] && [ -f "${CODEX_COMPOSE_FILE}" ] && \
+   grep -Fq -- "- ${CODEX_PATCH_HOST_PATH}:${CODEX_FIX_PATCH_DST}" "${CODEX_COMPOSE_FILE}"; then
+  CODEX_FIX_PREVIOUSLY_INSTALLED=true
+fi
 
 step "0. 系统检测"
 echo "OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -326,6 +336,9 @@ for d in /data/knowledge/{runbooks,playbooks,templates,changelog,architecture}; 
 done
 chmod 700 /data/backups /data/state /data/etc/openclaw
 chmod 755 /data/workspace /data/logs /data/scripts /data/knowledge
+# Gateway 以 UID/GID 1000（node）运行；Telegram Token 专用目录只对该用户开放，
+# Compose 仅挂载该目录，不暴露同级的 runtime.env。
+install -d -o 1000 -g 1000 -m 700 "${TELEGRAM_TOKEN_DIR}"
 ok "目录已创建"
 
 # ── 4. Gateway 配置 ──
@@ -402,6 +415,30 @@ if grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' "${COMPOSE_FILE}"; then
   fail "docker-compose 生成失败：存在未替换的占位符，请同步 envsubst 变量列表。残留: $(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' "${COMPOSE_FILE}" | sort -u | tr '\n' ' ')"
 fi
 chmod 600 "${COMPOSE_FILE}"
+
+# 保留重跑前已验证生效的 Codex 补丁挂载。模板本身不含该可选挂载，若不恢复会导致
+# 重跑安装时先丢失补丁、随后重复弹出交互配置。
+if $CODEX_FIX_PREVIOUSLY_INSTALLED; then
+  CODEX_MOUNT_SRC="${CODEX_PATCH_HOST_PATH}" CODEX_MOUNT_DST="${CODEX_FIX_PATCH_DST}" \
+  python3 - "${COMPOSE_FILE}" << 'PYEOF'
+import os, sys
+path = sys.argv[1]
+entry = "      - " + os.environ["CODEX_MOUNT_SRC"] + ":" + os.environ["CODEX_MOUNT_DST"]
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+if entry + chr(10) not in lines:
+    for i, line in enumerate(lines):
+        if line.startswith("    env_file:"):
+            lines.insert(i, entry + chr(10))
+            break
+    else:
+        raise SystemExit("Codex mount restore failed: env_file section not found")
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+PYEOF
+  NEED_RESTART=true
+  info "检测到已安装 Codex Responses 补丁，已保留挂载并跳过后续补丁交互"
+fi
 
 # Codex Responses 修复（可选）：把 dist 补丁文件复制到持久化目录并注入 compose 挂载。
 # 两个方案选一个（互斥已在上方校验）：
@@ -762,6 +799,10 @@ done
 # provider，也能在首装时完成补丁挂载。provider 名用于 Responses 路径白名单。
 step "12.4 Codex Responses 修复（可选）"
 configure_codex_fix_interactive() {
+  if $CODEX_FIX_PREVIOUSLY_INSTALLED; then
+    info "Codex Responses 补丁已安装且挂载完整，跳过交互配置"
+    return 0
+  fi
   echo ""
   echo "  是否启用 Codex / ChatGPT Subscription（type=57）兼容补丁？直接回车跳过。"
   echo "  仅当后端只接受 /v1/responses 且拒绝 system prompt 时需要。"
@@ -785,13 +826,7 @@ configure_codex_fix_interactive() {
       ;;
   esac
 
-  prompt "  要走 Codex Responses 的 provider 名称（可逗号分隔；回车稍后配置）: " CODEX_PROVIDER_INPUT
-  CODEX_PROVIDER_INPUT="$(echo "${CODEX_PROVIDER_INPUT}" | tr ' ' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')"
-  if [ -n "${CODEX_PROVIDER_INPUT}" ]; then
-    CODEX_RESPONSES_PROVIDERS="${CODEX_PROVIDER_INPUT}"
-  else
-    info "未填 provider 名；补丁会挂载，provider 白名单可在后续 provider 配置中补齐"
-  fi
+  info "Provider 名会在后续模型 Provider 配置中写入白名单；已有 Provider 可通过 CODEX_RESPONSES_PROVIDERS 预设。"
 }
 
 if $INTERACTIVE && ! $CODEX_FIX && ! $CODEX_FIX_B; then
@@ -1192,7 +1227,7 @@ fi
 # ── 12.6 Telegram 机器人接入（可选）──
 # 引导用户输入 Telegram bot token（来自 @BotFather）和一个或多个账号 ID，然后 merge 进
 # openclaw.json 的 channels.telegram 段（幂等，不覆盖已有字段）。token 不写明文进 json，
-# 而是写到一个独立文件（/data/etc/openclaw/telegram-bot-token），json 里用 tokenFile 引用。
+# 而是写到一个仅供 Gateway 读取的专用文件（${TELEGRAM_TOKEN_FILE}），json 里用 tokenFile 引用。
 step "12.6 Telegram 机器人接入"
 configure_telegram() {
   GWJSON="/data/state/openclaw.json"
@@ -1218,11 +1253,12 @@ configure_telegram() {
   TG_ALLOW_JSON=$(echo "${TG_ALLOW}" | tr ' ' '\n' | sed '/^[[:space:]]*$/d' | paste -sd',' -)
 
   # 写 token 到独立文件（不进 json），并 merge channels.telegram 段
-  mkdir -p /data/etc/openclaw
-  printf '%s' "${TG_TOKEN}" > /data/etc/openclaw/telegram-bot-token
-  chmod 600 /data/etc/openclaw/telegram-bot-token
+  install -d -o 1000 -g 1000 -m 700 "${TELEGRAM_TOKEN_DIR}"
+  printf '%s' "${TG_TOKEN}" > "${TELEGRAM_TOKEN_FILE}"
+  chown 1000:1000 "${TELEGRAM_TOKEN_FILE}"
+  chmod 600 "${TELEGRAM_TOKEN_FILE}"
 
-  TG_ALLOW_JSON="${TG_ALLOW_JSON}" python3 - "${GWJSON}" << 'PYEOF'
+  TG_ALLOW_JSON="${TG_ALLOW_JSON}" TELEGRAM_TOKEN_FILE="${TELEGRAM_TOKEN_FILE}" python3 - "${GWJSON}" << 'PYEOF'
 import json, sys, os, tempfile
 path = sys.argv[1]
 with open(path, encoding="utf-8") as f:
@@ -1230,7 +1266,7 @@ with open(path, encoding="utf-8") as f:
 ch = cfg.setdefault("channels", {})
 tg = ch.setdefault("telegram", {})
 tg["enabled"] = True
-tg["tokenFile"] = "/data/etc/openclaw/telegram-bot-token"
+tg["tokenFile"] = os.environ["TELEGRAM_TOKEN_FILE"]
 # dmPolicy：未显式配置时默认 allowlist（安全）；有 allowFrom 则 allowlist
 allow = os.environ.get("TG_ALLOW_JSON", "").strip()
 if allow:
@@ -1250,7 +1286,7 @@ os.chmod(path, 0o600)
 print("[configured telegram]")
 PYEOF
   ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
-  info "Bot Token 已保存到 /data/etc/openclaw/telegram-bot-token（权限 600，不写入 openclaw.json）"
+  info "Bot Token 已保存到 ${TELEGRAM_TOKEN_FILE}（权限 600，不写入 openclaw.json）"
   NEED_RESTART=true
 }
 
@@ -1261,11 +1297,12 @@ configure_telegram_noninteractive() {
   local TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
   [ -n "${TG_TOKEN}" ] || { info "未设置 TELEGRAM_BOT_TOKEN，跳过 Telegram 自动配置"; return 0; }
 
-  mkdir -p /data/etc/openclaw
-  printf '%s' "${TG_TOKEN}" > /data/etc/openclaw/telegram-bot-token
-  chmod 600 /data/etc/openclaw/telegram-bot-token
+  install -d -o 1000 -g 1000 -m 700 "${TELEGRAM_TOKEN_DIR}"
+  printf '%s' "${TG_TOKEN}" > "${TELEGRAM_TOKEN_FILE}"
+  chown 1000:1000 "${TELEGRAM_TOKEN_FILE}"
+  chmod 600 "${TELEGRAM_TOKEN_FILE}"
 
-  TG_ALLOW_JSON="${TELEGRAM_ALLOW_FROM:-}" python3 - "${GWJSON}" << 'PYEOF'
+  TG_ALLOW_JSON="${TELEGRAM_ALLOW_FROM:-}" TELEGRAM_TOKEN_FILE="${TELEGRAM_TOKEN_FILE}" python3 - "${GWJSON}" << 'PYEOF'
 import json, sys, os, tempfile
 path = sys.argv[1]
 with open(path, encoding="utf-8") as f:
@@ -1273,7 +1310,7 @@ with open(path, encoding="utf-8") as f:
 ch = cfg.setdefault("channels", {})
 tg = ch.setdefault("telegram", {})
 tg["enabled"] = True
-tg["tokenFile"] = "/data/etc/openclaw/telegram-bot-token"
+tg["tokenFile"] = os.environ["TELEGRAM_TOKEN_FILE"]
 allow = os.environ.get("TG_ALLOW_JSON", "").strip()
 allow = allow.replace(" ", ",")  # 兼容空格分隔
 if allow:
@@ -1292,7 +1329,7 @@ os.chmod(path, 0o600)
 print("[configured telegram]")
 PYEOF
   ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
-  info "Bot Token 已保存到 /data/etc/openclaw/telegram-bot-token（权限 600，不写入 openclaw.json）"
+  info "Bot Token 已保存到 ${TELEGRAM_TOKEN_FILE}（权限 600，不写入 openclaw.json）"
   NEED_RESTART=true
 }
 
