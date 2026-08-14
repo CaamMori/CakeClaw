@@ -13,8 +13,10 @@ Self-hosted AI DevOps Agent — baked with OpenClaw.
 ```bash
 git clone https://github.com/CaamMori/CakeClaw.git cakeclaw
 cd cakeclaw
-sudo ./scripts/install.sh   # 12 步全自动部署
+sudo ./scripts/install.sh   # 交互式部署，沿途可回车跳过可选项
 ```
+
+安装过程会依次引导你（直接回车即跳过）：模型 provider、Telegram 机器人、OpenCode。
 
 ### 可选：Codex Responses 修复
 
@@ -54,15 +56,15 @@ CODEX_RESPONSES_PROVIDERS=caner
 > 也可不走命令行参数，而在 `.env` 里设 `CODEX_FIX=1` 或 `CODEX_FIX_B=1`。
 > 两开关互斥，不能同时开启。实现细节见 `patches/` 与 `docs/`。
 
-### 可选：Telegram 机器人接入（--with-telegram）
+### 可选：Telegram 机器人接入
 
-想直接在同 Telegram 里与 agent 对话，在安装时开启 Telegram 接入：
+想直接在同 Telegram 里与 agent 对话，安装时会默认询问是否配置（回车跳过）：
 
 ```bash
-sudo ./scripts/install.sh --with-telegram
+sudo ./scripts/install.sh
 ```
 
-安装过程中会交互式引导你输入：
+交互式引导你输入：
 
 1. **Bot Token** — 去 Telegram 找 @BotFather → `/newbot` 创建机器人，复制 token。
 2. **账号 ID**（allowFrom）— 允许访问的 Telegram 账号数字 ID，多个用逗号分隔。
@@ -81,20 +83,19 @@ sudo ./scripts/install.sh --with-telegram
 
 ```bash
 # .env 里
-TELEGRAM_ENABLE=1
 TELEGRAM_BOT_TOKEN=123:abc...
 TELEGRAM_ALLOW_FROM=8524071159
 ```
 
-### 可选：安装 OpenCode（--with-opencode）
+### 可选：安装 OpenCode
 
-想再装一个终端 AI 编程代理，安装时开启：
+想再装一个终端 AI 编程代理，安装时会默认询问（回车跳过）：
 
 ```bash
-sudo ./scripts/install.sh --with-opencode
+sudo ./scripts/install.sh
 ```
 
-安装过程会交互式询问是否安装，确认后通过官方脚本安装：
+确认后通过官方脚本安装：
 
 ```bash
 curl -fsSL https://opencode.ai/install | bash
@@ -113,11 +114,11 @@ OPENCODE_INSTALL=1
 1. 选**哪家 API**（OpenAI / Claude / Azure / OpenAI 兼容）
 2. 填 API Key（Azure/兼容格式还需 Base URL）
 3. 脚本自动拉取该家的模型列表，勾选你要的模型
-4. 自动写入 `gateway.json` 并重启 Gateway 生效
+4. 自动写入 `openclaw.json` 并重启 Gateway 生效
 
 若跳过了，也可稍后手动配：
 1. 打开 Gateway 控制台（`http://<IP>:8080` 或无域名 `8080`）
-2. 在 `gateway.json` 里配 `models.providers` 的 API Key + Base URL + Model
+2. 在 `openclaw.json` 里配 `models.providers` 的 API Key + Base URL + Model
 3. 重启 Gateway 即生效
 
 - 有域名 → `sudo ./scripts/install.sh` 引导 HTTPS + Certbot
@@ -155,7 +156,7 @@ sudo ./scripts/install.sh --help    # 可选: --no-phase2 --no-phase3 跳过监�
 
 - `templates/SOUL.md` — Agent 行为契约
 - `templates/AGENTS.md` — 安全策略模板
-- `templates/gateway.json` — Gateway 配置骨架
+- `templates/openclaw.json` — Gateway 配置骨架
 
 ## 文档
 
