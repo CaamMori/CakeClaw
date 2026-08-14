@@ -471,19 +471,14 @@ step "7. Nginx"
 # 重跑 install.sh 不覆盖，但会重新检测默认站点并 reload（不应覆盖用户自定义 server 块）。
 if [ ! -f /etc/nginx/sites-available/cakeclaw ]; then
 if [ -n "$DOMAIN" ]; then
+  # 先只启用 HTTP：让 ACME HTTP-01 challenge 能通过，避免引用尚不存在的证书。
+  sudo mkdir -p /var/www/certbot
   cat > /etc/nginx/sites-available/cakeclaw << NGINX
 map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
 limit_conn_zone \$binary_remote_addr zone=cakeclaw_limit:10m;
-
 server {
   listen 80; server_name ${DOMAIN};
-  location / { return 301 https://\$host\$request_uri; }
-}
-server {
-  listen 443 ssl http2; server_name ${DOMAIN};
-  ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-  ssl_protocols       TLSv1.2 TLSv1.3;
+  location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }
   location / {
     proxy_pass http://127.0.0.1:${GATEWAY_PORT};
     proxy_http_version 1.1;
@@ -499,11 +494,42 @@ server {
 NGINX
   ln -sf /etc/nginx/sites-available/cakeclaw /etc/nginx/sites-enabled/cakeclaw
   rm -f /etc/nginx/sites-enabled/default
+  nginx -t || fail "HTTP Nginx 配置校验失败"
+  systemctl reload nginx
 
-  certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos -m "admin@${DOMAIN}" || \
-    info "证书签发跳过（DNS 可能未生效），需手动 certbot --nginx"
-  nginx -t && systemctl reload nginx
-  ok "Nginx HTTPS 就位"
+  if certbot certonly --webroot -w /var/www/certbot -d "${DOMAIN}" --non-interactive --agree-tos -m "admin@${DOMAIN}"; then
+    cat > /etc/nginx/sites-available/cakeclaw << NGINX
+map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
+limit_conn_zone \$binary_remote_addr zone=cakeclaw_limit:10m;
+server {
+  listen 80; server_name ${DOMAIN};
+  location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }
+  location / { return 301 https://\$host\$request_uri; }
+}
+server {
+  listen 443 ssl http2; server_name ${DOMAIN};
+  ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  location / {
+    proxy_pass http://127.0.0.1:${GATEWAY_PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection \$connection_upgrade;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 86400;
+    limit_conn cakeclaw_limit ${CONN_LIMIT};
+  }
+}
+NGINX
+    nginx -t || fail "HTTPS Nginx 配置校验失败"
+    systemctl reload nginx
+    ok "Nginx HTTPS 就位"
+  else
+    info "证书签发失败，保留 HTTP 控制台；请确认 DNS、80 端口与域名后重跑"
+  fi
 else
   # 无域名：只用 8080
   cat > /etc/nginx/sites-available/cakeclaw << NGINX
@@ -536,7 +562,11 @@ fi
 # Control UI 会以浏览器页面的完整 Origin 发起 WebSocket 握手。Gateway 默认拒绝
 # 未列入 allowedOrigins 的远程来源；Docker/Nginx 反代部署必须显式写入该来源。
 if [ -n "$DOMAIN" ]; then
-  CONTROL_UI_ORIGIN="https://${DOMAIN}"
+  if [ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]; then
+    CONTROL_UI_ORIGIN="https://${DOMAIN}"
+  else
+    CONTROL_UI_ORIGIN="http://${DOMAIN}"
+  fi
 else
   CONTROL_UI_IP="$(curl -4 -fsS --connect-timeout 5 --max-time 10 https://ipinfo.io/ip 2>/dev/null || hostname -I | awk '{print $1}')"
   CONTROL_UI_ORIGIN="http://${CONTROL_UI_IP}:8080"
@@ -544,14 +574,17 @@ fi
 CONTROL_UI_ORIGIN="$CONTROL_UI_ORIGIN" python3 - /data/state/openclaw.json << 'PYEOF'
 import json, os, sys, tempfile
 path = sys.argv[1]
-with open(path, encoding="utf-8") as f:\n    cfg = json.load(f)\ngateway = cfg.setdefault("gateway", {})
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)\ngateway = cfg.setdefault("gateway", {})
 ui = gateway.setdefault("controlUi", {})
 origin = os.environ["CONTROL_UI_ORIGIN"]
 origins = ui.setdefault("allowedOrigins", [])
 if origin not in origins:
     origins.append(origin)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-with os.fdopen(fd, "w", encoding="utf-8") as f:\n    json.dump(cfg, f, indent=2, ensure_ascii=False)\n    f.write("\n")
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
 os.replace(tmp, path)
 os.chown(path, 1000, 1000)
 os.chmod(path, 0o600)
