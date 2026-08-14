@@ -757,8 +757,14 @@ import sys, os
 path = sys.argv[1]
 mount_src = os.environ["CODEX_MOUNT_SRC"]
 mount_dst = os.environ["CODEX_MOUNT_DST"]
+vol_entry = "      - " + mount_src + ":" + mount_dst
 with open(path, encoding="utf-8") as f:
     lines = f.readlines()
+# 幂等：如果已有相同的 src:dst 挂载行（可能来自 step 6 的 --with-codex-fix-b），则不再注入。
+for line in lines:
+    if line.strip() == vol_entry.strip():
+        print("exists")
+        sys.exit(0)
 new_lines = []
 volumes_key_idx = None
 for i, line in enumerate(lines):
@@ -780,7 +786,7 @@ if volumes_key_idx is not None:
             break
     if insert_after is None:
         insert_after = volumes_key_idx
-    new_lines.insert(insert_after + 1, "      - " + mount_src + ":" + mount_dst + "\n")
+    new_lines.insert(insert_after + 1, vol_entry + "\n")
 with open(path, "w", encoding="utf-8") as f:
     f.writelines(new_lines)
 print("injected")
@@ -910,37 +916,12 @@ print(f"[configured provider] {name}")
 PYEOF
   ok "provider '${P_NAME}' 已写入 openclaw.json（重启 Gateway 生效）"
 
-  # 若本 provider 是 Codex 后端（12.5 内已挂补丁 + 写白名单），在所有改动落盘后统一重启一次：
-  # 先拉模型 + merge provider 完成，再重启并等 healthy，重启完即最终态。
+  # 若本 provider 是 Codex 后端，12.5 内只做了文件操作（挂补丁 + 写白名单），不重启容器。
+  # 这里只打印重启提示命令，让用户装完后再手动执行；脚本会继续往下跑 12.6/12.7，不被重启打断。
   if [ "${CODECX_DETECTED:-false}" = "true" ]; then
     echo ""
-    info "重启 Gateway 使补丁 + provider 配置生效..."
-    docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
-    OC_READY=false
-    for i in $(seq 1 36); do
-      sleep 5
-      HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
-      case "${HS}" in
-        healthy)
-          ok "Gateway 已就绪 (healthy, ${i}x5s)"
-          OC_READY=true
-          break
-          ;;
-        unhealthy)
-          docker logs cakeclaw-gateway --tail 30 2>&1
-          fail "Gateway 健康检查失败 (unhealthy)"
-          ;;
-        starting|no-health) : ;;
-        *)
-          docker logs cakeclaw-gateway --tail 30 2>&1
-          fail "Gateway 状态异常: ${HS}"
-          ;;
-      esac
-    done
-    if [ "${OC_READY}" != true ]; then
-      docker logs cakeclaw-gateway --tail 30 2>&1
-      fail "Gateway 未在 180s 内变为 healthy"
-    fi
+    info "补丁与白名单已就绪，安装完成后请手动重启 Gateway 生效："
+    echo "  docker compose -f /data/etc/openclaw/docker-compose.yml up -d"
   fi
 }
 
