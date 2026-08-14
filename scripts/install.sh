@@ -139,6 +139,18 @@ fi
 
 # 默认值
 DOMAIN="${DOMAIN:-}"
+# 交互安装时让用户直接提供域名；该值同时用于 Nginx、Let's Encrypt 与 Control UI 来源白名单。
+# 非交互环境继续只从 .env / DOMAIN 环境变量读取，避免 CI 卡在输入提示。
+if $INTERACTIVE && [ -z "$DOMAIN" ]; then
+  echo ""
+  echo "  可选：输入已解析到本机的域名以启用 HTTPS（例如 claw.example.com）。"
+  echo "  直接回车则使用 HTTP + 公网 IP:8080。"
+  prompt "  控制台域名（可留空）: " DOMAIN
+  DOMAIN="$(printf '%s' "$DOMAIN" | tr -d '[:space:]')"
+  if [ -n "$DOMAIN" ] && ! printf '%s' "$DOMAIN" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$'; then
+    fail "域名格式无效：请只输入域名，不要带 http://、路径或端口"
+  fi
+fi
 GATEWAY_PORT="${GATEWAY_PORT:-18789}"
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-ghcr.io/openclaw/openclaw:2026.7.1}"
 SSH_PORT="${SSH_PORT:-22}"
