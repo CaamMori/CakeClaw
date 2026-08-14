@@ -1,162 +1,30 @@
 # cakeclaw
 
-Self-hosted AI DevOps Agent — baked with OpenClaw.
-
-> **当前为个人/小规模部署。生产环境请自行加固认证、日志轮转和访问控制。**
-
-## 一句话
-
-基于 OpenClaw 构建的自托管 AI 运维工程师系统。一个脚本部署，无域名也能跑。
+基于 OpenClaw 的自托管 AI 运维工程师系统。一个脚本部署，无域名也能跑。
 
 ## 快速开始
 
 ```bash
 git clone https://github.com/CaamMori/CakeClaw.git cakeclaw
 cd cakeclaw
-sudo ./scripts/install.sh   # 交互式部署，沿途可回车跳过可选项
-```
-
-安装过程会依次引导你（直接回车即跳过）：模型 provider、Telegram 机器人、OpenCode。
-
-### 可选：Codex Responses 修复
-
-如果你的模型 provider 指向 ChatGPT Subscription / Codex（type=57）后端（只支持 `/v1/responses`），
-OpenClaw 会把 system prompt 当成 `input[].role="system"` 发送而被后端拒绝：
-
-```
-400 System messages are not allowed
-```
-
-cakeclaw 提供一键开关修好它（bind mount 一个改好的 dist 文件 + 环境变量白名单，不重新 build 镜像）。
-根据你的模型 `api` 取值，选一个开关：
-
-#### 方案 B（推荐，覆盖 `api: "openai-responses"`）
-
-绝大多数自定义 Codex 中转的把 provider `api` 写成 `openai-responses`。这种情况用：
-
-```bash
-sudo ./scripts/install.sh --with-codex-fix-b
-```
-
-#### Option C（仅 `api` 已是 Codex 专属值）
-
-若模型 `api` 已经是 `openai-chatgpt-responses` 或 `openclaw-openai-responses-transport`，用：
-
-```bash
-sudo ./scripts/install.sh --with-codex-fix
-```
-
-启用后，指定 provider 白名单（两方案都要）：
-
-```bash
-# .env 里（或安装后手动改 /data/etc/openclaw/runtime.env）
-CODEX_RESPONSES_PROVIDERS=caner
-```
-
-> 也可不走命令行参数，而在 `.env` 里设 `CODEX_FIX=1` 或 `CODEX_FIX_B=1`。
-> 两开关互斥，不能同时开启。实现细节见 `patches/` 与 `docs/`。
-
-### 可选：Telegram 机器人接入
-
-想直接在同 Telegram 里与 agent 对话，安装时会默认询问是否配置（回车跳过）：
-
-```bash
 sudo ./scripts/install.sh
 ```
 
-交互式引导你输入：
+安装过程交互式引导，直接回车即跳过可选项：模型 provider、Telegram 机器人、OpenCode。
 
-1. **Bot Token** — 去 Telegram 找 @BotFather → `/newbot` 创建机器人，复制 token。
-2. **账号 ID**（allowFrom）— 允许访问的 Telegram 账号数字 ID，多个用逗号分隔。
+## 可选功能
 
-> 查自己的 Telegram 账号 ID：
-> - 对机器人发消息后看 `openclaw logs --follow` 里的 `from.id`
-> - 或用官方 Bot API：`curl "https://api.telegram.org/bot<token>/getUpdates"`
-> - 或第三方 @userinfobot（不推荐，涉及隐私）
+| 功能 | 启用方式 |
+|------|----------|
+| Codex Responses 修复 | `--with-codex-fix` / `--with-codex-fix-b` |
+| Telegram 机器人 | 默认询问 |
+| OpenCode 终端代理 | 默认询问 |
 
-安全说明：token 不会写进 `openclaw.json` 明文，而是存到独立文件
-`/data/etc/openclaw/telegram-bot-token`（`chmod 600`），配置里用 `tokenFile` 引用。
-若安装时未填账号 ID，会改用 `dmPolicy: "pairing"`（首次私聊需 approve）；
-填了 ID 则用 `dmPolicy: "allowlist"`（仅名单内账号可触发）。
-
-非交互一键部署（CI / 脚本）可预填环境变量：
+非交互部署可用 `.env` 预填环境变量（见 `.env.example`）。
 
 ```bash
-# .env 里
-TELEGRAM_BOT_TOKEN=123:abc...
-TELEGRAM_ALLOW_FROM=8524071159
+sudo ./scripts/install.sh --help   # 查看全部选项
 ```
-
-### 可选：安装 OpenCode
-
-想再装一个终端 AI 编程代理，安装时会默认询问（回车跳过）：
-
-```bash
-sudo ./scripts/install.sh
-```
-
-确认后通过官方脚本安装：
-
-```bash
-curl -fsSL https://opencode.ai/install | bash
-```
-
-装完后输入 `opencode` 进入 TUI（终端交互界面），自带模型配置引导。
-非交互一键部署可在 `.env` 里设：
-
-```bash
-OPENCODE_INSTALL=1
-```
-
-部署完成后：
-
-`install.sh` 末尾会交互式引导你配置模型 provider（可直接回车跳过）：
-1. 选**哪家 API**（OpenAI / Claude / Azure / OpenAI 兼容）
-2. 填 API Key（Azure/兼容格式还需 Base URL）
-3. 脚本自动拉取该家的模型列表，勾选你要的模型
-4. 自动写入 `openclaw.json` 并重启 Gateway 生效
-
-若跳过了，也可稍后手动配：
-1. 打开 Gateway 控制台（`http://<IP>:8080` 或无域名 `8080`）
-2. 在 `openclaw.json` 里配 `models.providers` 的 API Key + Base URL + Model
-3. 重启 Gateway 即生效
-
-- 有域名 → `sudo ./scripts/install.sh` 引导 HTTPS + Certbot
-- 没域名 → HTTP + 8080
-
-```bash
-sudo ./scripts/install.sh --help    # 可选: --no-phase2 --no-phase3 跳过监控/审计
-```
-
-## 脚本
-
-| 脚本 | 用途 | 安装方式 |
-|------|------|----------|
-| `install.sh` | 一键部署 | 手动执行 |
-| `uninstall.sh` | 完整卸载 | 手动执行 |
-| `update.sh` | 版本更新 | 手动执行 |
-| `backup.sh` | 状态备份 | cron 自动 |
-| `watchdog.sh` | 健康评分 + 自动重启 | cron 自动 |
-| `alert.sh` | 告警通知 | watchdog 内调用 |
-| `trends.sh` | 周报聚合 | cron 自动 |
-| `cert-check.sh` | 证书到期提醒 | cron 自动 |
-| `audit.sh` | 审计日志 | cron 自动 |
-| `changelog.sh` | 变更记录 | 手动/Agent 调用 |
-| `kbase.sh` | 知识库维护 | 手动执行 |
-| `failover.sh` | 主备切换 | 手动/定时执行 |
-| `sync.sh` | 跨节点备份 | 手动配置 cron |
-| `worker-register.sh` | Worker 注册到 Master | 手动（Phase 4） |
-| `master-discover.sh` | Master 心跳发现 Worker | cron（Phase 4） |
-
-> 自动任务（backup/watchdog/trends/cert-check/audit/health-check）由 install.sh 写入
-> `/etc/cron.d/cakeclaw-*` 独立文件管理（不污染 root crontab，可精确卸载）。
-> 日志轮转由 `/etc/logrotate.d/cakeclaw` 控制，防止 `/data/logs/*.log` 无限增长。
-
-## 模板
-
-- `templates/SOUL.md` — Agent 行为契约
-- `templates/AGENTS.md` — 安全策略模板
-- `templates/openclaw.json` — Gateway 配置骨架
 
 ## 文档
 
