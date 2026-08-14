@@ -719,19 +719,19 @@ configure_provider() {
         CODECX_DETECTED=true
         echo ""
         echo "  Codex 后端需要补丁修复 system prompt 兼容。已提供两种补丁方案："
+        echo "    A) 方案 A — 仅 env 白名单，不改 api，需 api 已是 Codex 专属值"
         echo "    B) 方案 B（推荐）— 改 api 为 openai-responses，覆盖绝大多数自定义 Codex 中转"
-        echo "    C) Option C           — 仅 env 白名单，不改 api，需 api 已是 Codex 专属值"
-        read -r -p "  选择补丁方案 (B/C，默认 B): " CODECX_PATCH
+        read -r -p "  选择补丁方案 (A/B，默认 B): " CODECX_PATCH
         CODECX_PATCH="${CODECX_PATCH:-B}"
         case "${CODECX_PATCH}" in
+          a|A|1)
+            CODECX_PATCH_SRC="${CODEX_FIX_PATCH_SRC}"
+            info "已选择方案 A：仅 env 白名单补丁"
+            ;;
           b|B|2)
             P_API="openai-responses"
             CODECX_PATCH_SRC="${CODEX_FIX_B_PATCH_SRC}"
             info "已选择方案 B：api 设为 openai-responses"
-            ;;
-          c|C|3)
-            CODECX_PATCH_SRC="${CODEX_FIX_PATCH_SRC}"
-            info "已选择 Option C：仅 env 白名单补丁"
             ;;
           *)
             P_API="openai-responses"
