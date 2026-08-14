@@ -23,6 +23,7 @@ CODEX_FIX_B=false
 TELEGRAM_ENABLE=false
 OPENCODE_INSTALL=false
 HELP=false
+NEED_RESTART=false
 for arg in "$@"; do
   case "$arg" in
     --no-phase2) PHASE2=false ;;
@@ -915,13 +916,12 @@ os.replace(tmp, path)
 print(f"[configured provider] {name}")
 PYEOF
   ok "provider '${P_NAME}' 已写入 openclaw.json（重启 Gateway 生效）"
+  NEED_RESTART=true
 
-  # 若本 provider 是 Codex 后端，12.5 内只做了文件操作（挂补丁 + 写白名单），不重启容器。
-  # 这里只打印重启提示命令，让用户装完后再手动执行；脚本会继续往下跑 12.6/12.7，不被重启打断。
+  # 若本 provider 是 Codex 后端，12.5 内已挂补丁 + 写白名单，需重启才生效。
+  # 这里仅打标记，最终由脚本完成段在前（所有配置落地后）统一重启一次。
   if [ "${CODECX_DETECTED:-false}" = "true" ]; then
-    echo ""
-    info "补丁与白名单已就绪，安装完成后请手动重启 Gateway 生效："
-    echo "  docker compose -f /data/etc/openclaw/docker-compose.yml up -d"
+    NEED_RESTART=true
   fi
 }
 
@@ -996,6 +996,7 @@ os.replace(tmp, path)
 print(f"[configured provider] {name}")
 PYEOF
   ok "provider '${P_NAME}' 已写入 openclaw.json（重启 Gateway 生效）"
+  NEED_RESTART=true
 }
 
 # 非交互环境（如 CI / 无 TTY）：有 CAKECLAW_PROVIDER_BASE_URL 则自动配置，否则才跳过
@@ -1068,6 +1069,7 @@ os.replace(tmp, path)
 print("[configured telegram]")
 PYEOF
   ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
+  NEED_RESTART=true
 }
 
 # 非交互自动配置：通过 TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOW_FROM 环境变量（可写在 .env）注入。
@@ -1106,6 +1108,7 @@ os.replace(tmp, path)
 print("[configured telegram]")
 PYEOF
   ok "Telegram 机器人已写入 openclaw.json（重启 Gateway 生效）"
+  NEED_RESTART=true
 }
 
 if $TELEGRAM_ENABLE; then
@@ -1153,6 +1156,40 @@ if $OPENCODE_INSTALL; then
   fi
 else
   info "未启用 OpenCode 安装（--with-opencode 未指定）"
+fi
+
+# ── 12.8 重启生效（收尾） ──
+# 若本次安装过程中有任何需要 Gateway 重启才能生效的改动（Codex 补丁、新增 provider、Telegram 接入），
+# 在此处统一执行一次 up -d 并等 healthy。可避免在中间步骤反复重启，也保证跑完即最终态。
+if $NEED_RESTART; then
+  step "12.8 重启 Gateway 生效"
+  info "检测到配置/补丁改动，重启 Gateway 使其生效..."
+  docker compose -f /data/etc/openclaw/docker-compose.yml up -d 2>&1 || fail "Gateway 重启失败"
+  OC_READY=false
+  for i in $(seq 1 36); do
+    sleep 5
+    HS=$(docker inspect --format '{{.State.Health.Status}}' cakeclaw-gateway 2>/dev/null || echo "no-health")
+    case "${HS}" in
+      healthy)
+        ok "Gateway 已就绪 (healthy, ${i}x5s)"
+        OC_READY=true
+        break
+        ;;
+      unhealthy)
+        docker logs cakeclaw-gateway --tail 30 2>&1
+        fail "Gateway 健康检查失败 (unhealthy)"
+        ;;
+      starting|no-health) : ;;
+      *)
+        docker logs cakeclaw-gateway --tail 30 2>&1
+        fail "Gateway 状态异常: ${HS}"
+        ;;
+    esac
+  done
+  if [ "${OC_READY}" != true ]; then
+    docker logs cakeclaw-gateway --tail 30 2>&1
+    fail "Gateway 未在 180s 内变为 healthy"
+  fi
 fi
 
 # ── 完成 ──
