@@ -47,7 +47,15 @@ probe_codex_responses_model() {
   P_URL="${base_url}" P_KEY="${api_key}" P_MODEL="${model_id}" python3 - <<'PYEOF'
 import json, os, sys, urllib.error, urllib.request
 url = os.environ["P_URL"].rstrip("/") + "/responses"
-body = json.dumps({"model": os.environ["P_MODEL"], "input": "Reply with OK.", "max_output_tokens": 8}).encode()
+body = json.dumps({
+    "model": os.environ["P_MODEL"],
+    # This upstream requires streaming Responses requests with array-form input.
+    "stream": True,
+    "input": [{
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Reply exactly OK."}],
+    }],
+}).encode()
 req = urllib.request.Request(url, data=body, method="POST", headers={
     "Authorization": "Bearer " + os.environ["P_KEY"],
     "Content-Type": "application/json",
